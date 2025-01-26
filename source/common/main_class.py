@@ -26,8 +26,6 @@ class MainClass:
         self.__logger = None
         self.__setup_logging__()
 
-        warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
-
     def __ensure_logs_directory__(self):
         """
         Ensures that the logs directory exists. Creates it if it does not.
@@ -126,3 +124,16 @@ class MainClass:
                 logging.debug(f"File selected: {selected_path}")
                 return selected_path
             return None
+
+    def get_folder_via_dialog(self, title: str) -> Path:
+        """Open a folder dialog to select a folder.
+
+        :param title: Title of the dialog window.
+        :return: Path to the selected folder or None.
+        """
+        self.__logger.debug(f"Opening folder dialog: {title}")
+        with self._tkinter_root():
+            folder = filedialog.askdirectory(title=title, initialdir=self.base_path, mustexist=True)
+            selected_path = Path(folder)
+            self.__logger.debug(f"Folder selected: {selected_path}")
+            return selected_path
