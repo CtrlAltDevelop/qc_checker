@@ -1,6 +1,5 @@
 import sys
 import logging
-import warnings
 from contextlib import contextmanager
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -134,6 +133,9 @@ class MainClass:
         self.__logger.debug(f"Opening folder dialog: {title}")
         with self._tkinter_root():
             folder = filedialog.askdirectory(title=title, initialdir=self.base_path, mustexist=True)
+            if not folder:
+                logging.error(f"{title} not selected.")
+                raise NotADirectoryError(f"{folder} is not a valid directory.")
             selected_path = Path(folder)
             self.__logger.debug(f"Folder selected: {selected_path}")
             return selected_path
