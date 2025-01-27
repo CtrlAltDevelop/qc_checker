@@ -190,23 +190,10 @@ class QCChecker(MainClass):
                 self.red_flags[candle_path].append(f"Indices of duplicate rows: {list(duplicate_indices)}")
                 error = True
 
-        # Calculate conditions
+        # Check High and Low value
         high_is_max = (df['high'] != df[['open', 'high', 'low', 'close']].max(axis=1))
         low_is_min = (df['low'] != df[['open', 'high', 'low', 'close']].min(axis=1))
-
-        # Identify indices where conditions are False
-        high_is_max_false = high_is_max[~high_is_max].index
-        low_is_min_false = low_is_min[~low_is_min].index
-
-        # Generate the report only for indices with False conditions
-        for idx in sorted(set(high_is_max_false) | set(low_is_min_false)):
-            issues = []
-            if idx in high_is_max_false:
-                max_value = df.loc[idx, ['open', 'high', 'low', 'close']].max()
-                issues.append(f"High is not max (actual: {df.loc[idx, 'high']}, max: {max_value})")
-            if idx in low_is_min_false:
-                min_value = df.loc[idx, ['open', 'high', 'low', 'close']].min()
-                issues.append(f"Low is not min (actual: {df.loc[idx, 'low']}, min: {min_value})")
+        for idx in sorted(set(high_is_max[high_is_max].index) | set(low_is_min[low_is_min].index)):
+            self.red_flags[candle_path].append(f"Wrong Candle Data in Index {idx}")
             error = True
-            self.red_flags[candle_path].append(f"Index {idx}: " + "; ".join(issues))
-        return error, df
+        return error, df.sort_values(by='time')
