@@ -2,7 +2,7 @@ import logging
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Hashable
 
 import pandas as pd
 from tqdm import tqdm
@@ -85,19 +85,15 @@ class QCChecker(MainClass):
             mt4_folder, mt5_folder = self._get_folders_via_dialog()
 
         for symbol_path in tqdm([d for d in mt4_folder.iterdir() if d.is_dir()], desc=f"MT 4: {mt4_folder.name}"):
-            problem, data_frames = self._read_symbol_folder_data(symbol_path)
-            if not problem:
-                self._check_data_frame(symbol_path, data_frames, [
-                    'time', 'open', 'high', 'low', 'close', 'volume'])
+            problem, data_frames = self._read_symbol_folder_data(symbol_path, [
+                'time', 'open', 'high', 'low', 'close', 'volume'])
             break
 
-        time.sleep(.1)
-        for symbol_path in tqdm([d for d in mt5_folder.iterdir() if d.is_dir()], desc=f"MT 5: {mt4_folder.name}"):
-            problem, data_frames = self._read_symbol_folder_data(symbol_path)
-            if not problem:
-                self._check_data_frame(symbol_path, data_frames, [
-                    'time', 'open', 'high', 'low', 'close', 'tick volume', 'volume', 'spread'])
-            break
+        # time.sleep(.1)
+        # for symbol_path in tqdm([d for d in mt5_folder.iterdir() if d.is_dir()], desc=f"MT 5: {mt4_folder.name}"):
+        #     problem, data_frames = self._read_symbol_folder_data(symbol_path, [
+        #         'time', 'open', 'high', 'low', 'close', 'tick volume', 'volume', 'spread'])
+        #     break
 
         time.sleep(.1)
         logging.info('Data Analysis complete.')
@@ -108,7 +104,7 @@ class QCChecker(MainClass):
             for each in flags:
                 print(f'\t- {each}')
 
-    def _read_symbol_folder_data(self, folder: Path) -> Tuple[bool, Dict[int, pd.DataFrame]]:
+    def _read_symbol_folder_data(self, folder: Path, columns: List[str]) -> Tuple[bool, Dict[int, pd.DataFrame]]:
         error = False
         result = {}
         valid_files = set()  # Track valid file names
@@ -127,7 +123,10 @@ class QCChecker(MainClass):
                 error = True
             else:
                 try:
-                    result[t] = pd.read_csv(candle_path, header=None)
+                    df = pd.read_csv(candle_path, header=None)
+                    problem, result[t] = self._single_file_analysis(candle_path, df, columns)
+                    if problem:
+                        error = True
                 except Exception as e:
                     self.red_flags[folder].append(f"Failed to Read file: {e}")
                     error = True
@@ -140,9 +139,74 @@ class QCChecker(MainClass):
                 self.red_flags[folder].append(f'Unexpected file found: {extra_file}')
         return error, result
 
-    def _check_data_frame(self, symbol_path: Path, data_frames: Dict[int, pd.DataFrame], columns: List[str]):
-        print(symbol_path)
-        print(columns)
-        for key, value in data_frames.items():
-            print(f'Time Frame {key}')
-            print(value)
+    @staticmethod
+    def find_invalid_time_rows(time_series: pd.Series, date_format: str = "%d.%m.%Y %H:%M:%S.%f") -> List[Hashable]:
+        """Find indices of rows with invalid time formats."""
+        invalid_indices = []
+        for idx, value in time_series.items():
+            try:
+                pd.to_datetime(value, format=date_format, dayfirst=True)
+            except ValueError:
+                invalid_indices.append(idx)
+        return invalid_indices
+
+    def _single_file_analysis(self, candle_path: Path, df: pd.DataFrame, columns: List[str]) -> Tuple[bool, pd.DataFrame]:
+        error = False
+        df = df.copy()
+        # Validate the header of the DataFrame
+        try:
+            df.columns = columns
+        except ValueError as e:
+            self.red_flags[candle_path].append(f"Missing required columns: {e}")
+            error = True
+
+        # Validate the time column for correct date format.
+        if not error:
+            try:
+                df['time'] = pd.to_datetime(df['time'], format="%d.%m.%Y %H:%M:%S.%f", dayfirst=True)
+            except ValueError:
+                invalid_indices = self.find_invalid_time_rows(df['time'])
+                self.red_flags[candle_path].append(f"Rows with invalid time format: {invalid_indices}")
+                error = True
+
+        # Find the indices of empty rows
+        if not error:
+            empty_row_indices = df[df.isnull().all(axis=1)].index
+            if not empty_row_indices.empty:
+                self.red_flags[candle_path].append(f"Indices of empty rows: {list(empty_row_indices)}")
+                error = True
+
+        # Find the indices of empty columns
+        if not error:
+            empty_column_indices = df.columns[df.isnull().all()]
+            if len(empty_column_indices) > 0:
+                self.red_flags[candle_path].append(f"Indices of empty columns: {list(empty_column_indices)}")
+                error = True
+
+        # Find the indices of duplicate rows
+        if not error:
+            duplicate_indices = df[df.duplicated()].index
+            if not duplicate_indices.empty:
+                self.red_flags[candle_path].append(f"Indices of duplicate rows: {list(duplicate_indices)}")
+                error = True
+
+        # Calculate conditions
+        high_is_max = (df['high'] != df[['open', 'high', 'low', 'close']].max(axis=1))
+        low_is_min = (df['low'] != df[['open', 'high', 'low', 'close']].min(axis=1))
+
+        # Identify indices where conditions are False
+        high_is_max_false = high_is_max[~high_is_max].index
+        low_is_min_false = low_is_min[~low_is_min].index
+
+        # Generate the report only for indices with False conditions
+        for idx in sorted(set(high_is_max_false) | set(low_is_min_false)):
+            issues = []
+            if idx in high_is_max_false:
+                max_value = df.loc[idx, ['open', 'high', 'low', 'close']].max()
+                issues.append(f"High is not max (actual: {df.loc[idx, 'high']}, max: {max_value})")
+            if idx in low_is_min_false:
+                min_value = df.loc[idx, ['open', 'high', 'low', 'close']].min()
+                issues.append(f"Low is not min (actual: {df.loc[idx, 'low']}, min: {min_value})")
+            error = True
+            self.red_flags[candle_path].append(f"Index {idx}: " + "; ".join(issues))
+        return error, df
