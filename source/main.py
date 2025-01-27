@@ -138,7 +138,7 @@ class QCChecker(MainClass):
             else:
                 try:
                     df = pd.read_csv(candle_path, header=None)
-                    problem, result[t] = self._single_file_analysis(candle_path, df, columns)
+                    problem, result[t] = self._single_file_analysis(candle_path, df, columns, t != 1)
                     if problem:
                         error = True
                 except Exception as e:
@@ -164,7 +164,8 @@ class QCChecker(MainClass):
                 invalid_indices.append(idx)
         return invalid_indices
 
-    def _single_file_analysis(self, path: Path, df: pd.DataFrame, columns: List[str]) -> Tuple[bool, pd.DataFrame]:
+    def _single_file_analysis(self, path: Path, df: pd.DataFrame, columns: List[str], check_volume: bool) \
+            -> Tuple[bool, pd.DataFrame]:
         error = False
         df = df.copy()
         # Validate the header of the DataFrame
@@ -184,25 +185,22 @@ class QCChecker(MainClass):
                 error = True
 
         # Find the indices of empty rows
-        if not error:
-            empty_row_indices = df[df.isnull().all(axis=1)].index
-            if not empty_row_indices.empty:
-                self.red_flags[path].append(f"Indices of empty rows: {list(empty_row_indices)}")
-                error = True
+        empty_row_indices = df[df.isnull().all(axis=1)].index
+        if not empty_row_indices.empty:
+            self.red_flags[path].append(f"Indices of empty rows: {list(empty_row_indices)}")
+            error = True
 
         # Find the indices of empty columns
-        if not error:
-            empty_column_indices = df.columns[df.isnull().all()]
-            if len(empty_column_indices) > 0:
-                self.red_flags[path].append(f"Indices of empty columns: {list(empty_column_indices)}")
-                error = True
+        empty_column_indices = df.columns[df.isnull().all()]
+        if len(empty_column_indices) > 0:
+            self.red_flags[path].append(f"Indices of empty columns: {list(empty_column_indices)}")
+            error = True
 
         # Find the indices of duplicate rows
-        if not error:
-            duplicate_indices = df[df.duplicated()].index
-            if not duplicate_indices.empty:
-                self.red_flags[path].append(f"Indices of duplicate rows: {list(duplicate_indices)}")
-                error = True
+        duplicate_indices = df[df.duplicated()].index
+        if not duplicate_indices.empty:
+            self.red_flags[path].append(f"Indices of duplicate rows: {list(duplicate_indices)}")
+            error = True
 
         # Check High and Low value
         high_is_max = (df['high'] != df[['open', 'high', 'low', 'close']].max(axis=1))
@@ -210,6 +208,15 @@ class QCChecker(MainClass):
         for idx in sorted(set(high_is_max[high_is_max].index) | set(low_is_min[low_is_min].index)):
             self.red_flags[path].append(f"Wrong Candle Data in Index {idx}")
             error = True
+
+        # check volume
+        if check_volume:
+            last_volume = df['volume'].copy()
+            df['volume'] = df['volume'].replace(1, 2)
+            if not (last_volume == df['volume']).all():
+                self.red_flags[path].append(f'Volumes updated, Save to {path}')
+                df.to_csv(path, header=False, index=False)
+
         return error, df.sort_values(by='time')
 
     def _multi_file_analysis(self, path: Path, dfs: Dict[int, pd.DataFrame]) -> bool:
