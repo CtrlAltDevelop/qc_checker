@@ -19,6 +19,7 @@ class QCChecker(MainClass):
     default_mt4 = Path('Z:/(Sharing Technical Team)/Symbols Data-DS/Candle Data-DS/Candle Data-MT4-DS/')
     default_mt5 = Path('Z:/(Sharing Technical Team)/Symbols Data-DS/Candle Data-DS/Candle Data-MT5-DS/')
     config = configparser.ConfigParser()
+    multiplier = 3
 
     def __init__(self, base_path: Path, debug: bool = True) -> None:
         """
@@ -95,14 +96,14 @@ class QCChecker(MainClass):
             self._multi_file_analysis(symbol_path, data_frames)
             break
 
-        time.sleep(.1)
-        for symbol_path in tqdm([d for d in mt5_folder.iterdir() if d.is_dir()], desc=f"MT 5: {mt4_folder.name}"):
-            columns = ['time', 'open', 'high', 'low', 'close', 'tick volume', 'volume', 'spread']
-            data_frames = self._read_symbol_folder_data(symbol_path, columns)
-            for time_frame, df in data_frames.items():
-                self._single_file_analysis(symbol_path, df, time_frame != 1)
-            self._multi_file_analysis(symbol_path, data_frames)
-            break
+        # time.sleep(.1)
+        # for symbol_path in tqdm([d for d in mt5_folder.iterdir() if d.is_dir()], desc=f"MT 5: {mt4_folder.name}"):
+        #     columns = ['time', 'open', 'high', 'low', 'close', 'tick volume', 'volume', 'spread']
+        #     data_frames = self._read_symbol_folder_data(symbol_path, columns)
+        #     for time_frame, df in data_frames.items():
+        #         self._single_file_analysis(symbol_path, df, time_frame != 1)
+        #     self._multi_file_analysis(symbol_path, data_frames)
+        #     break
 
         time.sleep(.1)
         logging.info('Data Analysis complete.')
@@ -114,6 +115,16 @@ class QCChecker(MainClass):
                 print(f'\t- {each}')
 
     def _read_symbol_folder_data(self, folder: Path, columns: List[str]) ->  Dict[int, pd.DataFrame]:
+        def find_invalid_time_rows(time_series: pd.Series, date_format: str = "%d.%m.%Y %H:%M:%S.%f") -> List[Hashable]:
+            """Find indices of rows with invalid time formats."""
+            _invalid_indices = []
+            for idx, value in time_series.items():
+                try:
+                    pd.to_datetime(value, format=date_format, dayfirst=True)
+                except ValueError:
+                    _invalid_indices.append(idx)
+            return _invalid_indices
+
         result = {}
         valid_files = set()
         parts = folder.name.split('-', 1)
@@ -141,7 +152,7 @@ class QCChecker(MainClass):
                     try:
                         df['time'] = pd.to_datetime(df['time'], format="%d.%m.%Y %H:%M:%S.%f", dayfirst=True)
                     except ValueError:
-                        invalid_indices = self.find_invalid_time_rows(df['time'])
+                        invalid_indices = find_invalid_time_rows(df['time'])
                         self.red_flags[candle_path].append(f"Rows with invalid time format: {invalid_indices}")
 
                     result[t] = df.sort_values(by='time')
@@ -156,17 +167,6 @@ class QCChecker(MainClass):
             for extra_file in extra_files:
                 self.red_flags[folder].append(f'Unexpected file found: {extra_file}')
         return result
-
-    @staticmethod
-    def find_invalid_time_rows(time_series: pd.Series, date_format: str = "%d.%m.%Y %H:%M:%S.%f") -> List[Hashable]:
-        """Find indices of rows with invalid time formats."""
-        invalid_indices = []
-        for idx, value in time_series.items():
-            try:
-                pd.to_datetime(value, format=date_format, dayfirst=True)
-            except ValueError:
-                invalid_indices.append(idx)
-        return invalid_indices
 
     def _single_file_analysis(self, path: Path, df: pd.DataFrame, check: bool):
         df = df.copy()
@@ -199,6 +199,26 @@ class QCChecker(MainClass):
             if not (last_volume == df['volume']).all():
                 self.red_flags[path].append(f'Volumes updated, Save to {path}')
                 df.to_csv(path, header=False, index=False)
+
+        # check the gap between candle
+        df['prev_close'] = df['close'].shift(1)
+        df['prev_time'] = df['time'].shift(1)
+        df['time_diff'] = (df['time'] - df['prev_time']).dt.total_seconds() / 60
+        df['TR1'] = df['high'] - df['low']
+        df['TR2'] = (df['high'] - df['prev_close']).abs()
+        df['TR3'] = (df['low'] - df['prev_close']).abs()
+
+        df['TR'] = df[['TR1', 'TR2', 'TR3']].max(axis=1)
+        df['ATR'] = df['TR'].rolling(window=14).mean()
+        df['ATR_Multi'] = df['ATR'] * self.multiplier
+        df['Diff'] = abs(df['prev_close'] - df['open'])
+        df.drop(columns=['TR', 'TR1', 'TR2', 'TR3'], inplace=True)
+
+        big_gap = df[(df['Diff'] > df['ATR_Multi']) & (df['time_diff'] <= 15)]
+        if not big_gap.empty:
+            print(len(big_gap.index))
+
+            self.red_flags[path].append(f'Index with Unnormal Gap: {big_gap.index}')
 
     def _multi_file_analysis(self, path: Path, dfs: Dict[int, pd.DataFrame]):
         # Check start times
