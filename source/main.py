@@ -1,5 +1,6 @@
-import logging
 import time
+import logging
+import configparser
 from collections import defaultdict
 from pathlib import Path
 from typing import Tuple, List, Dict, Hashable
@@ -17,6 +18,7 @@ class QCChecker(MainClass):
     red_flags: Dict[Path, List[str]] =  defaultdict(lambda: [])
     default_mt4 = Path('Z:/(Sharing Technical Team)/Symbols Data-DS/Candle Data-DS/Candle Data-MT4-DS/')
     default_mt5 = Path('Z:/(Sharing Technical Team)/Symbols Data-DS/Candle Data-DS/Candle Data-MT5-DS/')
+    config = configparser.ConfigParser()
 
     def __init__(self, base_path: Path, debug: bool = True) -> None:
         """
@@ -29,6 +31,7 @@ class QCChecker(MainClass):
         self.debug: bool = debug
         self.result_path = self.base_path / "results"
         self.result_path.mkdir(parents=True, exist_ok=True)
+        self.config.read(self.base_path / 'settings.ini')
 
     def _get_folders_via_dialog(self) -> Tuple[Path, Path]:
         """
@@ -141,7 +144,7 @@ class QCChecker(MainClass):
                         invalid_indices = self.find_invalid_time_rows(df['time'])
                         self.red_flags[candle_path].append(f"Rows with invalid time format: {invalid_indices}")
 
-                    result[t] = df
+                    result[t] = df.sort_values(by='time')
 
                 except Exception as e:
                     self.red_flags[folder].append(f"Failed to Read file: {e}")
@@ -165,7 +168,7 @@ class QCChecker(MainClass):
                 invalid_indices.append(idx)
         return invalid_indices
 
-    def _single_file_analysis(self, path: Path, df: pd.DataFrame, check: bool)  -> pd.DataFrame:
+    def _single_file_analysis(self, path: Path, df: pd.DataFrame, check: bool):
         df = df.copy()
 
         # Find the indices of empty rows
@@ -196,8 +199,6 @@ class QCChecker(MainClass):
             if not (last_volume == df['volume']).all():
                 self.red_flags[path].append(f'Volumes updated, Save to {path}')
                 df.to_csv(path, header=False, index=False)
-
-        return df.sort_values(by='time')
 
     def _multi_file_analysis(self, path: Path, dfs: Dict[int, pd.DataFrame]):
         # Check start times
