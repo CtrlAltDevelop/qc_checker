@@ -87,6 +87,10 @@ class QCChecker(MainClass):
         for symbol_path in tqdm([d for d in mt4_folder.iterdir() if d.is_dir()], desc=f"MT 4: {mt4_folder.name}"):
             problem, data_frames = self._read_symbol_folder_data(symbol_path, [
                 'time', 'open', 'high', 'low', 'close', 'volume'])
+            if problem:
+                continue
+
+            problem = self._multi_file_analysis(symbol_path, data_frames)
             break
 
         # time.sleep(.1)
@@ -197,3 +201,21 @@ class QCChecker(MainClass):
             self.red_flags[candle_path].append(f"Wrong Candle Data in Index {idx}")
             error = True
         return error, df.sort_values(by='time')
+
+    def _multi_file_analysis(self, candle_path: Path, dfs: Dict[int, pd.DataFrame]) -> bool:
+        error = False
+
+        # Check start times
+        start_times = [(i, df['time'].iloc[0].date()) for i, df in dfs.items()]
+        if len(set(t for _, t in start_times)) != 1:
+            error = True
+            self.red_flags[candle_path].append(
+                f"TimeFrames Data do not start at the same datetime. Details: {start_times}")
+
+        # Check end times
+        end_times = [(i, df['time'].iloc[-1].date()) for i, df in dfs.items()]
+        if len(set(t for _, t in end_times)) != 1:
+            error = True
+            self.red_flags[candle_path].append(
+                f"TimeFrames Data do not end at the same datetime. Details: {end_times}")
+        return error
