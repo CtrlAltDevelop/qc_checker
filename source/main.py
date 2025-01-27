@@ -83,11 +83,21 @@ class QCChecker(MainClass):
         mt4_folder, mt5_folder = self.default_mt4, self.default_mt5
         if not self.debug:
             mt4_folder, mt5_folder = self._get_folders_via_dialog()
-        for symbol_path in tqdm([d for d in mt4_folder.iterdir() if d.is_dir()], desc=f"MT 4: {mt4_folder.name}"):
-            pass
 
+        for symbol_path in tqdm([d for d in mt4_folder.iterdir() if d.is_dir()], desc=f"MT 4: {mt4_folder.name}"):
+            problem, data_frames = self._read_symbol_folder_data(symbol_path)
+            if not problem:
+                self._check_data_frame(symbol_path, data_frames, [
+                    'time', 'open', 'high', 'low', 'close', 'volume'])
+            break
+
+        time.sleep(.1)
         for symbol_path in tqdm([d for d in mt5_folder.iterdir() if d.is_dir()], desc=f"MT 5: {mt4_folder.name}"):
-            pass
+            problem, data_frames = self._read_symbol_folder_data(symbol_path)
+            if not problem:
+                self._check_data_frame(symbol_path, data_frames, [
+                    'time', 'open', 'high', 'low', 'close', 'tick volume', 'volume', 'spread'])
+            break
 
         time.sleep(.1)
         logging.info('Data Analysis complete.')
@@ -97,3 +107,42 @@ class QCChecker(MainClass):
             print(f'ERRORS: {path}')
             for each in flags:
                 print(f'\t- {each}')
+
+    def _read_symbol_folder_data(self, folder: Path) -> Tuple[bool, Dict[int, pd.DataFrame]]:
+        error = False
+        result = {}
+        valid_files = set()  # Track valid file names
+        parts = folder.name.split('-', 1)
+
+        # Generate valid file names based on the expected pattern
+        for t in tqdm([1, 5, 15, 30, 60, 240, 1440], desc='Read Candle Data File'):
+            if len(parts) > 1:
+                file_name = f'{parts[0]}-{t}-{parts[1]}.csv'
+            else:
+                file_name = f'{parts[0]}-{t}.csv'
+            valid_files.add(file_name)
+            candle_path = folder / file_name
+            if not candle_path.exists():
+                self.red_flags[folder].append(f'Candle Data is missing: {candle_path}')
+                error = True
+            else:
+                try:
+                    result[t] = pd.read_csv(candle_path, header=None)
+                except Exception as e:
+                    self.red_flags[folder].append(f"Failed to Read file: {e}")
+                    error = True
+
+        # Check for extra files
+        all_files = {f.name for f in folder.iterdir() if f.is_file()}
+        extra_files = all_files - valid_files
+        if extra_files:
+            for extra_file in extra_files:
+                self.red_flags[folder].append(f'Unexpected file found: {extra_file}')
+        return error, result
+
+    def _check_data_frame(self, symbol_path: Path, data_frames: Dict[int, pd.DataFrame], columns: List[str]):
+        print(symbol_path)
+        print(columns)
+        for key, value in data_frames.items():
+            print(f'Time Frame {key}')
+            print(value)
