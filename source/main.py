@@ -85,28 +85,20 @@ class QCChecker(MainClass):
             mt4_folder, mt5_folder = self._get_folders_via_dialog()
 
         for symbol_path in tqdm([d for d in mt4_folder.iterdir() if d.is_dir()], desc=f"MT 4: {mt4_folder.name}"):
-            problem, data_frames = self._read_symbol_folder_data(symbol_path, [
-                'time', 'open', 'high', 'low', 'close', 'volume'])
-            if problem:
-                continue
-
-            problem = self._multi_file_analysis(symbol_path, data_frames)
-            if problem:
-                continue
-
+            columns = ['time', 'open', 'high', 'low', 'close', 'volume']
+            data_frames = self._read_symbol_folder_data(symbol_path, columns)
+            for time_frame, df in data_frames.items():
+                self._single_file_analysis(symbol_path, df, time_frame != 1)
+            self._multi_file_analysis(symbol_path, data_frames)
             break
 
         time.sleep(.1)
         for symbol_path in tqdm([d for d in mt5_folder.iterdir() if d.is_dir()], desc=f"MT 5: {mt4_folder.name}"):
-            problem, data_frames = self._read_symbol_folder_data(symbol_path, [
-                'time', 'open', 'high', 'low', 'close', 'tick volume', 'volume', 'spread'])
-            if problem:
-                continue
-
-            problem = self._multi_file_analysis(symbol_path, data_frames)
-            if problem:
-                continue
-
+            columns = ['time', 'open', 'high', 'low', 'close', 'tick volume', 'volume', 'spread']
+            data_frames = self._read_symbol_folder_data(symbol_path, columns)
+            for time_frame, df in data_frames.items():
+                self._single_file_analysis(symbol_path, df, time_frame != 1)
+            self._multi_file_analysis(symbol_path, data_frames)
             break
 
         time.sleep(.1)
@@ -118,10 +110,9 @@ class QCChecker(MainClass):
             for each in flags:
                 print(f'\t- {each}')
 
-    def _read_symbol_folder_data(self, folder: Path, columns: List[str]) -> Tuple[bool, Dict[int, pd.DataFrame]]:
-        error = False
+    def _read_symbol_folder_data(self, folder: Path, columns: List[str]) ->  Dict[int, pd.DataFrame]:
         result = {}
-        valid_files = set()  # Track valid file names
+        valid_files = set()
         parts = folder.name.split('-', 1)
 
         # Generate valid file names based on the expected pattern
@@ -134,16 +125,26 @@ class QCChecker(MainClass):
             candle_path = folder / file_name
             if not candle_path.exists():
                 self.red_flags[folder].append(f'Candle Data is missing: {candle_path}')
-                error = True
             else:
                 try:
                     df = pd.read_csv(candle_path, header=None)
-                    problem, result[t] = self._single_file_analysis(candle_path, df, columns, t != 1)
-                    if problem:
-                        error = True
+                    # Validate the header of the DataFrame
+                    try:
+                        df.columns = columns
+                    except ValueError as e:
+                        self.red_flags[candle_path].append(f"Missing required columns: {e}")
+
+                    # Validate the time column for correct date format.
+                    try:
+                        df['time'] = pd.to_datetime(df['time'], format="%d.%m.%Y %H:%M:%S.%f", dayfirst=True)
+                    except ValueError:
+                        invalid_indices = self.find_invalid_time_rows(df['time'])
+                        self.red_flags[candle_path].append(f"Rows with invalid time format: {invalid_indices}")
+
+                    result[t] = df
+
                 except Exception as e:
                     self.red_flags[folder].append(f"Failed to Read file: {e}")
-                    error = True
 
         # Check for extra files
         all_files = {f.name for f in folder.iterdir() if f.is_file()}
@@ -151,7 +152,7 @@ class QCChecker(MainClass):
         if extra_files:
             for extra_file in extra_files:
                 self.red_flags[folder].append(f'Unexpected file found: {extra_file}')
-        return error, result
+        return result
 
     @staticmethod
     def find_invalid_time_rows(time_series: pd.Series, date_format: str = "%d.%m.%Y %H:%M:%S.%f") -> List[Hashable]:
@@ -164,75 +165,47 @@ class QCChecker(MainClass):
                 invalid_indices.append(idx)
         return invalid_indices
 
-    def _single_file_analysis(self, path: Path, df: pd.DataFrame, columns: List[str], check_volume: bool) \
-            -> Tuple[bool, pd.DataFrame]:
-        error = False
+    def _single_file_analysis(self, path: Path, df: pd.DataFrame, check: bool)  -> pd.DataFrame:
         df = df.copy()
-        # Validate the header of the DataFrame
-        try:
-            df.columns = columns
-        except ValueError as e:
-            self.red_flags[path].append(f"Missing required columns: {e}")
-            error = True
-
-        # Validate the time column for correct date format.
-        if not error:
-            try:
-                df['time'] = pd.to_datetime(df['time'], format="%d.%m.%Y %H:%M:%S.%f", dayfirst=True)
-            except ValueError:
-                invalid_indices = self.find_invalid_time_rows(df['time'])
-                self.red_flags[path].append(f"Rows with invalid time format: {invalid_indices}")
-                error = True
 
         # Find the indices of empty rows
         empty_row_indices = df[df.isnull().all(axis=1)].index
         if not empty_row_indices.empty:
             self.red_flags[path].append(f"Indices of empty rows: {list(empty_row_indices)}")
-            error = True
 
         # Find the indices of empty columns
         empty_column_indices = df.columns[df.isnull().all()]
         if len(empty_column_indices) > 0:
             self.red_flags[path].append(f"Indices of empty columns: {list(empty_column_indices)}")
-            error = True
 
         # Find the indices of duplicate rows
         duplicate_indices = df[df.duplicated()].index
         if not duplicate_indices.empty:
             self.red_flags[path].append(f"Indices of duplicate rows: {list(duplicate_indices)}")
-            error = True
 
         # Check High and Low value
         high_is_max = (df['high'] != df[['open', 'high', 'low', 'close']].max(axis=1))
         low_is_min = (df['low'] != df[['open', 'high', 'low', 'close']].min(axis=1))
         for idx in sorted(set(high_is_max[high_is_max].index) | set(low_is_min[low_is_min].index)):
             self.red_flags[path].append(f"Wrong Candle Data in Index {idx}")
-            error = True
 
         # check volume
-        if check_volume:
+        if check:
             last_volume = df['volume'].copy()
             df['volume'] = df['volume'].replace(1, 2)
             if not (last_volume == df['volume']).all():
                 self.red_flags[path].append(f'Volumes updated, Save to {path}')
                 df.to_csv(path, header=False, index=False)
 
-        return error, df.sort_values(by='time')
+        return df.sort_values(by='time')
 
-    def _multi_file_analysis(self, path: Path, dfs: Dict[int, pd.DataFrame]) -> bool:
-        error = False
-
+    def _multi_file_analysis(self, path: Path, dfs: Dict[int, pd.DataFrame]):
         # Check start times
         start_times = [(i, df['time'].iloc[0].date()) for i, df in dfs.items()]
         if len(set(t for _, t in start_times)) != 1:
-            error = True
-            self.red_flags[path].append(
-                f"TimeFrames Data do not start at the same datetime. Details: {start_times}")
+            self.red_flags[path].append(f"TimeFrames Data do not start at the same datetime. Details: {start_times}")
 
         # Check end times
         end_times = [(i, df['time'].iloc[-1].date()) for i, df in dfs.items()]
         if len(set(t for _, t in end_times)) != 1:
-            error = True
-            self.red_flags[path].append(
-                f"TimeFrames Data do not end at the same datetime. Details: {end_times}")
-        return error
+            self.red_flags[path].append(f"TimeFrames Data do not end at the same datetime. Details: {end_times}")
