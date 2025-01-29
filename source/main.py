@@ -16,10 +16,12 @@ class QCChecker(MainClass):
     A class to analyze trade spreads, check stop loss hits, and generate trade reports.
     """
     red_flags: Dict[Path, List[str]] =  defaultdict(lambda: [])
+    weekend_candle = {1: 120, 5: 24, 15: 8, 30: 4, 60: 2, 240: 1, 1440: 1}
     default_mt4 = Path('Z:/(Sharing Technical Team)/Symbols Data-DS/Candle Data-DS/Candle Data-MT4-DS/')
     default_mt5 = Path('Z:/(Sharing Technical Team)/Symbols Data-DS/Candle Data-DS/Candle Data-MT5-DS/')
     config = configparser.ConfigParser()
     multiplier = 3
+    is_gmt = False
 
     def __init__(self, base_path: Path, debug: bool = True) -> None:
         """
@@ -92,7 +94,7 @@ class QCChecker(MainClass):
             columns = ['time', 'open', 'high', 'low', 'close', 'volume']
             data_frames = self._read_symbol_folder_data(symbol_path, columns)
             for time_frame, df in data_frames.items():
-                self._single_file_analysis(symbol_path, df, time_frame != 1)
+                self._single_file_analysis(symbol_path, df, time_frame)
             self._multi_file_analysis(symbol_path, data_frames)
             break
 
@@ -101,7 +103,7 @@ class QCChecker(MainClass):
         #     columns = ['time', 'open', 'high', 'low', 'close', 'tick volume', 'volume', 'spread']
         #     data_frames = self._read_symbol_folder_data(symbol_path, columns)
         #     for time_frame, df in data_frames.items():
-        #         self._single_file_analysis(symbol_path, df, time_frame != 1)
+        #         self._single_file_analysis(symbol_path, df, time_frame)
         #     self._multi_file_analysis(symbol_path, data_frames)
         #     break
 
@@ -168,7 +170,7 @@ class QCChecker(MainClass):
                 self.red_flags[folder].append(f'Unexpected file found: {extra_file}')
         return result
 
-    def _single_file_analysis(self, path: Path, df: pd.DataFrame, check: bool):
+    def _single_file_analysis(self, path: Path, df: pd.DataFrame, time_frame: int):
         df = df.copy()
 
         # Find the indices of empty rows
@@ -193,7 +195,7 @@ class QCChecker(MainClass):
             self.red_flags[path].append(f"Wrong Candle Data in Index {idx}")
 
         # check volume
-        if check:
+        if time_frame != 1:
             last_volume = df['volume'].copy()
             df['volume'] = df['volume'].replace(1, 2)
             if not (last_volume == df['volume']).all():
@@ -216,9 +218,17 @@ class QCChecker(MainClass):
 
         big_gap = df[(df['Diff'] > df['ATR_Multi']) & (df['time_diff'] <= 15)]
         if not big_gap.empty:
-            print(len(big_gap.index))
-
             self.red_flags[path].append(f'Index with Unnormal Gap: {big_gap.index}')
+
+        # check weekend candle
+        df['day_of_week'] = df['time'].dt.dayofweek
+        weekend_data = df[(df['day_of_week'] == 5) | (df['day_of_week'] == 6)]
+        if self.is_gmt and len(weekend_data) > self.weekend_candle.get(time_frame):
+            self.red_flags[path].append(f"Data exists for Saturdays and/or Sundays. Count: {len(weekend_data)}, " 
+                                        f"Max: {self.weekend_candle.get(time_frame)}, Details: {weekend_data.index}")
+        elif not self.is_gmt and not weekend_data.empty:
+            self.red_flags[path].append(f"Data exists for Saturdays and/or Sundays. Count: {len(weekend_data)}, " 
+                                        f"Max: 0, Details: {weekend_data.index}")
 
     def _multi_file_analysis(self, path: Path, dfs: Dict[int, pd.DataFrame]):
         # Check start times
