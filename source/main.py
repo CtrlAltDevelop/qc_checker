@@ -15,11 +15,12 @@ class QCChecker(MainClass):
     """
     A class to analyze trade spreads, check stop loss hits, and generate trade reports.
     """
-    red_flags: Dict[Path, List[str]] =  defaultdict(lambda: [])
-    weekend_candle = {1: 120, 5: 24, 15: 8, 30: 4, 60: 2, 240: 1, 1440: 1}
     default_mt4 = Path('Z:/(Sharing Technical Team)/Symbols Data-DS/Candle Data-DS/Candle Data-MT4-DS/')
     default_mt5 = Path('Z:/(Sharing Technical Team)/Symbols Data-DS/Candle Data-DS/Candle Data-MT5-DS/')
+    weekend_candle = {1: 120, 5: 24, 15: 8, 30: 4, 60: 2, 240: 1, 1440: 1}
+    red_flags: Dict[Path, List[str]] =  defaultdict(lambda: [])
     config = configparser.ConfigParser()
+    spread = dict()
     multiplier = 3
     is_gmt = False
 
@@ -32,6 +33,7 @@ class QCChecker(MainClass):
         """
         super().__init__(base_path)
         self.debug: bool = debug
+        self.data_path = self.base_path / "data"
         self.result_path = self.base_path / "results"
         self.result_path.mkdir(parents=True, exist_ok=True)
         self.config.read(self.base_path / 'settings.ini')
@@ -83,9 +85,14 @@ class QCChecker(MainClass):
         logging.info(f"Selected folders: MT4: {mt4_folder}, MT5: {mt5_folder}")
         return mt4_folder, mt5_folder
 
+    def _load_spread(self):
+        for file in (self.data_path / "Spread_Files").glob('*.xlsx'):
+            self.spread[file.stem] = pd.read_excel(file, skiprows=1)['Normal spread(Point)'][0]
+
     def __run__(self):
         """Initialize data by loading symbol, spreads, candles, and report."""
         logging.info('Data Analysis Started.')
+        self._load_spread()
         mt4_folder, mt5_folder = self.default_mt4, self.default_mt5
         if not self.debug:
             mt4_folder, mt5_folder = self._get_folders_via_dialog()
@@ -176,30 +183,30 @@ class QCChecker(MainClass):
         # Find the indices of empty rows
         empty_row_indices = df[df.isnull().all(axis=1)].index
         if not empty_row_indices.empty:
-            self.red_flags[path].append(f"Indices of empty rows: {list(empty_row_indices)}")
+            self.red_flags[path].append(f"TF: {time_frame}, Indices of empty rows: {list(empty_row_indices)}")
 
         # Find the indices of empty columns
         empty_column_indices = df.columns[df.isnull().all()]
         if len(empty_column_indices) > 0:
-            self.red_flags[path].append(f"Indices of empty columns: {list(empty_column_indices)}")
+            self.red_flags[path].append(f"TF: {time_frame}, Indices of empty columns: {list(empty_column_indices)}")
 
         # Find the indices of duplicate rows
         duplicate_indices = df[df.duplicated()].index
         if not duplicate_indices.empty:
-            self.red_flags[path].append(f"Indices of duplicate rows: {list(duplicate_indices)}")
+            self.red_flags[path].append(f"TF: {time_frame}, Indices of duplicate rows: {list(duplicate_indices)}")
 
         # Check High and Low value
         high_is_max = (df['high'] != df[['open', 'high', 'low', 'close']].max(axis=1))
         low_is_min = (df['low'] != df[['open', 'high', 'low', 'close']].min(axis=1))
         for idx in sorted(set(high_is_max[high_is_max].index) | set(low_is_min[low_is_min].index)):
-            self.red_flags[path].append(f"Wrong Candle Data in Index {idx}")
+            self.red_flags[path].append(f"TF: {time_frame}, Wrong Candle Data in Index {idx}")
 
         # check volume
         if time_frame != 1:
             last_volume = df['volume'].copy()
             df['volume'] = df['volume'].replace(1, 2)
             if not (last_volume == df['volume']).all():
-                self.red_flags[path].append(f'Volumes updated, Save to {path}')
+                self.red_flags[path].append(f'TF: {time_frame}, Volumes updated, Save to {path}')
                 df.to_csv(path, header=False, index=False)
 
         # check the gap between candle
@@ -218,17 +225,30 @@ class QCChecker(MainClass):
 
         big_gap = df[(df['Diff'] > df['ATR_Multi']) & (df['time_diff'] <= 15)]
         if not big_gap.empty:
-            self.red_flags[path].append(f'Index with Unnormal Gap: {big_gap.index}')
+            self.red_flags[path].append(f'TF: {time_frame}, Index with Unnormal Gap: {big_gap.index}')
 
         # check weekend candle
         df['day_of_week'] = df['time'].dt.dayofweek
         weekend_data = df[(df['day_of_week'] == 5) | (df['day_of_week'] == 6)]
         if self.is_gmt and len(weekend_data) > self.weekend_candle.get(time_frame):
-            self.red_flags[path].append(f"Data exists for Saturdays and/or Sundays. Count: {len(weekend_data)}, " 
-                                        f"Max: {self.weekend_candle.get(time_frame)}, Details: {weekend_data.index}")
+            self.red_flags[path].append(
+                f"TF: {time_frame}, Data exists for Saturdays and/or Sundays. Count: {len(weekend_data)}, Max: "
+                f"{self.weekend_candle.get(time_frame)}, Details: {weekend_data.index}")
         elif not self.is_gmt and not weekend_data.empty:
-            self.red_flags[path].append(f"Data exists for Saturdays and/or Sundays. Count: {len(weekend_data)}, " 
-                                        f"Max: 0, Details: {weekend_data.index}")
+            self.red_flags[path].append(
+                f"TF: {time_frame}, Data exists for Saturdays and/or Sundays. Count: {len(weekend_data)}, Max: 0, "
+                f"Details: {weekend_data.index}")
+
+        # check spread
+        if 'spread' in df.columns:
+            symbol_name = path.stem.split('-')[0]
+            spread = self.spread.get(symbol_name, None)
+            if spread is None:
+                self.red_flags[path].append(f"TF: {time_frame}, Can not find spread for Symbol {symbol_name}")
+            else:
+                wrong_spread = df[df['spread'] != spread]
+                if not wrong_spread.empty:
+                    self.red_flags[path].append(f"TF: {time_frame}, Wrong spread, Valid: {spread}, Index: {wrong_spread.index}")
 
     def _multi_file_analysis(self, path: Path, dfs: Dict[int, pd.DataFrame]):
         # Check start times
