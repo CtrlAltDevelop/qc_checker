@@ -103,16 +103,14 @@ class QCChecker(MainClass):
             for time_frame, df in data_frames.items():
                 self._single_file_analysis(symbol_path, df, time_frame)
             self._multi_file_analysis(symbol_path, data_frames)
-            break
 
-        # time.sleep(.1)
-        # for symbol_path in tqdm([d for d in mt5_folder.iterdir() if d.is_dir()], desc=f"MT 5: {mt4_folder.name}"):
-        #     columns = ['time', 'open', 'high', 'low', 'close', 'tick volume', 'volume', 'spread']
-        #     data_frames = self._read_symbol_folder_data(symbol_path, columns)
-        #     for time_frame, df in data_frames.items():
-        #         self._single_file_analysis(symbol_path, df, time_frame)
-        #     self._multi_file_analysis(symbol_path, data_frames)
-        #     break
+        time.sleep(.1)
+        for symbol_path in tqdm([d for d in mt5_folder.iterdir() if d.is_dir()], desc=f"MT 5: {mt4_folder.name}"):
+            columns = ['time', 'open', 'high', 'low', 'close', 'tick volume', 'volume', 'spread']
+            data_frames = self._read_symbol_folder_data(symbol_path, columns)
+            for time_frame, df in data_frames.items():
+                self._single_file_analysis(symbol_path, df, time_frame)
+            self._multi_file_analysis(symbol_path, data_frames)
 
         time.sleep(.1)
         logging.info('Data Analysis complete.')
@@ -221,7 +219,6 @@ class QCChecker(MainClass):
         df['ATR'] = df['TR'].rolling(window=14).mean()
         df['ATR_Multi'] = df['ATR'] * self.multiplier
         df['Diff'] = abs(df['prev_close'] - df['open'])
-        df.drop(columns=['TR', 'TR1', 'TR2', 'TR3'], inplace=True)
 
         big_gap = df[(df['Diff'] > df['ATR_Multi']) & (df['time_diff'] <= 15)]
         if not big_gap.empty:
@@ -248,7 +245,8 @@ class QCChecker(MainClass):
             else:
                 wrong_spread = df[df['spread'] != spread]
                 if not wrong_spread.empty:
-                    self.red_flags[path].append(f"TF: {time_frame}, Wrong spread, Valid: {spread}, Index: {wrong_spread.index}")
+                    self.red_flags[path].append(f"TF: {time_frame}, Wrong spread, Valid: {spread}, "
+                                                f"Index: {wrong_spread.index}")
 
     def _multi_file_analysis(self, path: Path, dfs: Dict[int, pd.DataFrame]):
         # Check start times
