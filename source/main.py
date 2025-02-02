@@ -154,12 +154,6 @@ class QCChecker(MainClass):
         :param columns: Expected column names.
         :return: Dictionary mapping timeframe to DataFrame.
         """
-
-        def find_invalid_time_rows(series: pd.Series, date_format: str = "%d.%m.%Y %H:%M:%S.%f") -> List[int]:
-            # Vectorized conversion: invalid rows become NaT.
-            converted = pd.to_datetime(series, format=date_format, errors='coerce', dayfirst=True)
-            return series.index[converted.isna()].tolist()
-
         result: Dict[int, pd.DataFrame] = {}
         valid_files = set()
         parts = folder.name.split('-', 1)
@@ -177,8 +171,7 @@ class QCChecker(MainClass):
                 if len(df.columns) != len(columns):
                     self.red_flags[candle_path].append(f"Expected {len(columns)} columns, found {len(df.columns)}")
                 df.columns = columns[:len(df.columns)]
-                df['time'] = pd.to_datetime(df['time'], format="%d.%m.%Y %H:%M:%S.%f",
-                                            errors='coerce', dayfirst=True)
+                df['time'] = pd.to_datetime(df['time'], format="%d.%m.%Y %H:%M:%S.%f", errors='coerce', dayfirst=True)
                 invalid_indices = df.index[df['time'].isna()].tolist()
                 if invalid_indices:
                     self.red_flags[candle_path].append(f"Invalid time format in rows: {invalid_indices}")
