@@ -2,3 +2,4 @@ pyinstaller
 pandas
 tqdm
 openpyxl
+aiohttp
