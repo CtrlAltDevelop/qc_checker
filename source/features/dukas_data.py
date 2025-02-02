@@ -1,8 +1,11 @@
 import asyncio
 import lzma
 import struct
+import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Union
+
 import aiohttp
 import pandas as pd
 
@@ -28,116 +31,110 @@ class DukasData:
         )
     }
     SERVER = 'https://www.dukascopy.com/datafeed'
-    TICK_URL = "{server}/{currency}/{year}/{month:02d}/{day:02d}/{hour:02d}h_ticks.bi5"
-    BID_CANDLE_URL = "{server}/{currency}/{year}/{month:02d}/{day:02d}/BID_candles_min_1.bi5"
-    ASK_CANDLE_URL = "{server}/{currency}/{year}/{month:02d}/{day:02d}/ASK_candles_min_1.bi5"
+    TICK_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/{hour:02d}h_ticks.bi5"
+    BID_CANDLE_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/BID_candles_min_1.bi5"
+    ASK_CANDLE_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/ASK_candles_min_1.bi5"
 
-    def __init__(self, data_path: Path) -> None:
-        self.data_path = data_path
+    def __init__(self, data_path: Union[str, Path]) -> None:
+        self.data_path = Path(data_path)
 
     @classmethod
     async def _download_file_async(cls, url: str, file_path: Path) -> bytes:
         """
-        Asynchronously downloads a file from the provided URL using aiohttp.
-        If the file already exists locally, it is read and returned.
-        Retries indefinitely on HTTP 403, 404, or 500 status codes.
+        Asynchronously downloads a file from the given URL.
+        If the file exists locally, its contents are returned immediately.
+        Retries indefinitely on HTTP errors (403, 404, 500).
         """
         if file_path.exists() and file_path.is_file():
-            print(f"File '{file_path}' exists. Reading from disk.")
-            with open(file_path, 'rb') as f:
-                return f.read()
+            logging.info(f"File '{file_path}' exists. Reading from disk.")
+            return file_path.read_bytes()
 
         async with aiohttp.ClientSession() as session:
             while True:
                 try:
-                    print(f"Requesting URL: {url}")
+                    logging.info(f"Requesting URL: {url}")
                     async with session.get(url, headers=cls.HEADER) as response:
                         if response.status == 200:
                             data = await response.read()
-                            with open(file_path, 'wb') as f:
-                                f.write(data)
-                            print("Download successful.")
+                            file_path.parent.mkdir(parents=True, exist_ok=True)
+                            file_path.write_bytes(data)
+                            logging.info("Download successful.")
                             return data
                         elif response.status in (403, 404, 500):
-                            print(f"Error {response.status} received. Retrying in 5 seconds...")
+                            logging.warning(f"Error {response.status} received. Retrying in 3 seconds...")
                             await asyncio.sleep(3)
                         else:
-                            print(f"Unexpected status code {response.status}. Retrying in 5 seconds...")
+                            logging.warning(f"Unexpected status code {response.status}. Retrying in 3 seconds...")
                             await asyncio.sleep(3)
                 except Exception as e:
-                    print(f"Exception during download: {e}. Retrying in 5 seconds...")
+                    logging.error(f"Exception during download: {e}. Retrying in 3 seconds...")
                     await asyncio.sleep(3)
 
-    async def _get_tick_data_async(self, currency: str, year: int, month: int, day: int, hour: int) -> bytes:
+    async def _get_tick_data_async(self, symbol: str, year: int, month: int, day: int, hour: int) -> bytes:
         """
-        Constructs the tick URL, downloads the tick data file asynchronously,
-        and returns the raw binary content.
-        The provided month is 1-indexed (1 for January) and is converted to 0-indexed for the URL.
+        Constructs the tick URL and downloads the tick data file asynchronously.
+        The provided month is 1-indexed (e.g. January = 1) and is converted to 0-indexed.
         """
-        url = self.TICK_URL.format(currency=currency, year=year, month=month - 1, day=day, hour=hour)
-        file_path = self.data_path / currency / f'{year:04d}' / f'{month:02d}' /f'{day:02d}' / f'{hour:02d}h_ticks.bi5'
+        # Dukascopy expects 0-indexed months
+        url = self.TICK_URL.format(server=self.SERVER, symbol=symbol, year=year, month=month - 1, day=day, hour=hour)
+        file_path = self.data_path / symbol / f"{year:04d}" / f"{month:02d}" / f"{day:02d}" / f"{hour:02d}h_ticks.bi5"
         return await self._download_file_async(url, file_path)
 
-    async def _get_candle_data_async(self, currency: str, year: int, month: int, day: int, source: str) -> bytes:
+    async def _get_candle_data_async(self, symbol: str, year: int, month: int, day: int, source: str) -> bytes:
         """
-        Constructs the candle URL, downloads the candle data file asynchronously,
-        and returns the raw binary content.
-        The provided month is 1-indexed (1 for January) and is converted to 0-indexed for the URL.
-
-        Parameters:
-            source (str): 'BID' or 'ASK'. Defaults to 'BID'.
+        Constructs the candle URL and downloads the candle data file asynchronously.
+        The provided month is 1-indexed and is converted to 0-indexed.
+        Parameter:
+            source (str): 'BID' or 'ASK'
         """
         candle_type = source.upper()
-        date = dict(currency=currency, year=year, month=month - 1, day=day)
+        date = dict(server=self.SERVER, symbol=symbol, year=year, month=month - 1, day=day)
         if candle_type == 'BID':
             url = self.BID_CANDLE_URL.format(**date)
-            file_path = self.data_path / currency / f'{year:04d}_{month:02d}_{day:02d}_bid_m1_candles.bi5'
+            file_path = self.data_path / symbol / f"{year:04d}_{month:02d}_{day:02d}_bid_m1_candles.bi5"
         elif candle_type == 'ASK':
             url = self.ASK_CANDLE_URL.format(**date)
-            file_path = self.data_path / currency / f'{year:04d}_{month:02d}_{day:02d}_ask_m1_candles.bi5'
+            file_path = self.data_path / symbol / f"{year:04d}_{month:02d}_{day:02d}_ask_m1_candles.bi5"
         else:
-            raise ValueError("candle_type must be either 'BID' or 'ASK'")
+            raise ValueError("source must be either 'BID' or 'ASK'")
         return await self._download_file_async(url, file_path)
 
     @staticmethod
     def _decompress_data(data: bytes) -> bytes:
         """
         Attempts to decompress the data using lzma.
-        If lzma decompression fails, returns the data as is.
+        If decompression fails, returns the original data.
         """
         try:
             decompressed = lzma.decompress(data)
-            print("LZMA decompression successful.")
+            logging.info("LZMA decompression successful.")
             return decompressed
         except Exception as e:
-            print(f"LZMA decompression failed: {e}. Using raw data.")
+            logging.warning(f"LZMA decompression failed: {e}. Using raw data.")
             return data
 
     @staticmethod
-    def _get_contract_size(symbol:str) -> int:
-        # read json file and get size with symbol key
+    def _get_contract_size(symbol: str) -> int:
+        """
+        Returns the contract size for the given symbol.
+        (For now, always returns 100000; modify if necessary.)
+        """
         return 100000
 
     def _parse_candle_data(self, symbol: str, data: bytes, year: int, month: int, day: int) -> pd.DataFrame:
         """
-        Parses decompressed candle data.
-        Assumes each candle record is 24 bytes, stored as six values:
-          - 4 bytes unsigned int: timestamp (seconds offset from midnight)
-          - 4 bytes unsigned int: open price (price * 100000)
-          - 4 bytes unsigned int: high price (price * 100000)
-          - 4 bytes unsigned int: low price (price * 100000)
-          - 4 bytes unsigned int: close price (price * 100000)
-          - 4 bytes float: volume
-        Converts the price values to floats by dividing by 100000.
-        If base_year, base_month, and base_day are provided, a datetime column is created by
-        adding the timestamp (in seconds) to the base date.
-        Returns a pandas DataFrame with the parsed records.
+        Parses 24-byte candle records into a pandas DataFrame.
+        Each record consists of:
+          - timestamp (unsigned int; seconds offset from midnight)
+          - open price (unsigned int; price * contract_size)
+          - high price (unsigned int; price * contract_size)
+          - low price (unsigned int; price * contract_size)
+          - close price (unsigned int; price * contract_size)
+          - volume (float; as stored)
         """
-
         candles = []
-        record_size = 24  # 6 x 4 bytes each
+        record_size = 24
         total_records = len(data) // record_size
-        # print(f"Total candle records found: {total_records}")
         size = self._get_contract_size(symbol)
         base_time = pd.Timestamp(year=year, month=month, day=day)
         for i in range(total_records):
@@ -150,27 +147,24 @@ class DukasData:
                 candles.append({'timestamp': base_time + pd.to_timedelta(ts, unit='s'), 'open': open_i / size,
                                 'high': high_i / size, 'low': low_i / size, 'close': close_i / size, 'volume': volume})
             except Exception as e:
-                print(f"Error parsing candle record {i}: {e}")
+                logging.error(f"Error parsing candle record {i}: {e}")
         return pd.DataFrame(candles)
 
     def _parse_tick_data(self, symbol: str, data: bytes, year: int, month: int, day: int, hour: int) -> pd.DataFrame:
         """
-        Parses tick data.
-        Assumes each tick record is 20 bytes, stored as five unsigned integers:
-          - 4 bytes unsigned int: timestamp offset in milliseconds (from the beginning of the hour)
-          - 4 bytes unsigned int: ask price (price * 100000)
-          - 4 bytes unsigned int: bid price (price * 100000)
-          - 4 bytes unsigned int: ask volume
-          - 4 bytes unsigned int: bid volume
-        The ask and bid prices are converted to floats by dividing by 100000.0.
-        A datetime column is created by adding the millisecond offset to the base hour’s timestamp.
-        Additionally, a new column 'spread' is calculated as (ask - bid).
-        Returns a pandas DataFrame with the parsed tick records.
+        Parses 20-byte tick records into a pandas DataFrame.
+        Each record consists of:
+          - timestamp offset in ms (unsigned int)
+          - ask price (unsigned int; price * 100000)
+          - bid price (unsigned int; price * 100000)
+          - ask volume (unsigned int)
+          - bid volume (unsigned int)
+        A datetime column is created from the base hour plus the offset.
+        The spread is calculated as (ask - bid) / contract size.
         """
         ticks = []
-        record_size = 20  # 5 x 4 bytes each
+        record_size = 20
         total_records = len(data) // record_size
-        # print(f"Total tick records found: {total_records}")
         size = self._get_contract_size(symbol)
         base_time = pd.Timestamp(year=year, month=month, day=day, hour=hour)
         for i in range(total_records):
@@ -179,19 +173,43 @@ class DukasData:
             if len(record) < record_size:
                 break
             try:
+                # Using network byte order (!) and five unsigned ints
                 ts_ms, ask_i, bid_i, ask_vol, bid_vol = struct.unpack('!IIIff', record)
                 ticks.append({'timestamp': base_time + pd.to_timedelta(ts_ms, unit='ms'), 'ask': ask_i / size,
-                              'bid': bid_i / size, 'spread': ask_i - bid_i, 'ask_vol': ask_vol, 'bid_vol': bid_vol})
+                              'bid': bid_i / size, 'spread': (ask_i - bid_i) / size, 'ask_vol': ask_vol,
+                              'bid_vol': bid_vol})
             except Exception as e:
-                print(f"Error parsing tick record {i}: {e}")
+                logging.error(f"Error parsing tick record {i}: {e}")
         return pd.DataFrame(ticks)
 
-    async def get_candle_data(self, symbol: str, time: datetime, source: str = 'BID') -> pd.DataFrame:
-        raw_data = await self._get_candle_data_async(symbol, time.year, time.month, time.day, source)
-        decompressed = self._decompress_data(raw_data)
-        return self._parse_candle_data(symbol, decompressed, time.year, time.month, time.day)
+    def get_candle_data(self, symbol: str, dt: datetime, source: str = 'BID') -> pd.DataFrame:
+        """
+        Synchronous wrapper that downloads and parses candle data for the given symbol and datetime.
+        Internally it calls the asynchronous method using asyncio.run.
+        """
+        return asyncio.run(self.get_candle_data_async(symbol, dt, source))
 
-    async def get_tick_data(self, symbol: str, time: datetime) -> pd.DataFrame:
-        raw_data = await self._get_tick_data_async(symbol, time.year, time.month, time.day, time.hour)
+    async def get_candle_data_async(self, symbol: str, dt: datetime, source: str = 'BID') -> pd.DataFrame:
+        """
+        Asynchronously downloads, decompresses, and parses candle data for the given symbol and datetime.
+        The source parameter can be 'BID' or 'ASK'.
+        """
+        raw_data = await self._get_candle_data_async(symbol, dt.year, dt.month, dt.day, source)
         decompressed = self._decompress_data(raw_data)
-        return self._parse_tick_data(symbol, decompressed, time.year, time.month, time.day, time.hour)
+        return self._parse_candle_data(symbol, decompressed, dt.year, dt.month, dt.day)
+
+    def get_tick_data(self, symbol: str, dt: datetime) -> pd.DataFrame:
+        """
+        Synchronous wrapper that downloads and parses tick data for the given symbol and datetime.
+        Internally it calls the asynchronous method using asyncio.run.
+        """
+        return asyncio.run(self.get_tick_data_async(symbol, dt))
+
+    async def get_tick_data_async(self, symbol: str, dt: datetime) -> pd.DataFrame:
+        """
+        Asynchronously downloads, decompresses, and parses tick data for the given symbol and datetime.
+        The dt.hour value is used as the base hour for tick offsets.
+        """
+        raw_data = await self._get_tick_data_async(symbol, dt.year, dt.month, dt.day, dt.hour)
+        decompressed = self._decompress_data(raw_data)
+        return self._parse_tick_data(symbol, decompressed, dt.year, dt.month, dt.day, dt.hour)
