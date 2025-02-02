@@ -3,30 +3,27 @@ import logging
 import configparser
 from collections import defaultdict
 from pathlib import Path
-from typing import Tuple, List, Dict, Hashable
+from typing import Tuple, List, Dict
 
 import pandas as pd
 from tqdm import tqdm
 
 from source.common.main_class import MainClass
 
+# Define common timeframes as a constant.
+TIMEFRAMES = [1, 5, 15, 30, 60, 240, 1440]
+WEEKEND_CANDLE = {1: 120, 5: 24, 15: 8, 30: 4, 60: 2, 240: 1, 1440: 1}
+
 
 class QCChecker(MainClass):
     """
     A class to analyze trade spreads, check stop loss hits, and generate trade reports.
     """
-    default_mt4 = Path('Z:/(Sharing Technical Team)/Symbols Data-DS/Candle Data-DS/Candle Data-MT4-DS/')
-    default_mt5 = Path('Z:/(Sharing Technical Team)/Symbols Data-DS/Candle Data-DS/Candle Data-MT5-DS/')
-    weekend_candle = {1: 120, 5: 24, 15: 8, 30: 4, 60: 2, 240: 1, 1440: 1}
-    red_flags: Dict[Path, List[str]] =  defaultdict(lambda: [])
-    config = configparser.ConfigParser()
-    spread = dict()
-    multiplier = 3
-    is_gmt = False
-
     def __init__(self, base_path: Path, debug: bool = True) -> None:
         """
-        Initialize the TradeSpreadAnalyze instance.
+        Initialize the QCChecker instance.
+
+        Reads configuration settings from settings.ini.
 
         :param base_path: Base directory path.
         :param debug: Flag to enable debug mode.
@@ -36,178 +33,209 @@ class QCChecker(MainClass):
         self.data_path = self.base_path / "data"
         self.result_path = self.base_path / "results"
         self.result_path.mkdir(parents=True, exist_ok=True)
+
+        # Read INI configuration
+        self.config = configparser.ConfigParser()
         self.config.read(self.base_path / 'settings.ini')
+
+        # Read configuration values from INI
+        self.is_gmt = self.config.getboolean("Files", "TimeZoneGMT", fallback=False)
+        self.default_mt4 = Path(self.config.get("Files", "MT4"))
+        self.default_mt5 = Path(self.config.get("Files", "MT5"))
+        self.multiplier = self.config.getfloat("ATR", "Multiplier", fallback=3)
+        self.save_after_update = self.config.getboolean("Volume", "SaveAfterUpdate", fallback=True)
+
+        self.red_flags: Dict[Path, List[str]] = defaultdict(list)
+        self.spread: Dict[str, float] = {}
 
     def _get_folders_via_dialog(self) -> Tuple[Path, Path]:
         """
         Retrieves paths for MT4 and MT5 folders.
-        Uses default paths if they exist; otherwise, prompts the user to select folders via dialog.
+        Uses default paths if they exist; otherwise, prompts the user to select folders via a dialog.
 
         :return: A tuple containing paths for the MT4 and MT5 folders.
         """
 
-        # Check if default MT4 folder exists
-        mt4_folder = self.default_mt4 if self.default_mt4.exists() else None
-        if not mt4_folder:
-            logging.info(f"Default MT4 folder not found. Prompting user to select folder.")
-            mt4_folder = self.get_folder_via_dialog('Select folder to analyze Candle Data-MT4')
-            if not mt4_folder:
-                raise FileNotFoundError("MT4 folder selection was canceled.")
+        def get_folder(default_folder: Path, prompt_msg: str) -> Path:
+            if default_folder.exists():
+                return default_folder
+            logging.info(f"Default folder not found: {default_folder}. Prompting user.")
+            folder = self.get_folder_via_dialog(prompt_msg)
+            if folder is None:
+                raise FileNotFoundError(f"Folder selection canceled for: {prompt_msg}")
+            return folder
 
-        # Check if default MT5 folder exists
-        mt5_folder = self.default_mt5 if self.default_mt5.exists() else None
-        if not mt5_folder:
-            logging.info(f"Default MT5 folder not found. Prompting user to select folder.")
-            mt5_folder = self.get_folder_via_dialog('Select folder to analyze Candle Data-MT5')
-            if not mt5_folder:
-                raise FileNotFoundError("MT5 folder selection was canceled.")
+        mt4_folder = get_folder(self.default_mt4, 'Select folder to analyze Candle Data-MT4')
+        mt5_folder = get_folder(self.default_mt5, 'Select folder to analyze Candle Data-MT5')
 
-        # Confirm folders with the user
+        logging.info(f"Selected folders: MT4: {mt4_folder}, MT5: {mt5_folder}")
         print('Program will use the following folders:')
         print(f'\tMeta 4 Folder: {mt4_folder}')
         print(f'\tMeta 5 Folder: {mt5_folder}')
         while True:
             answer = input('Do you wish to continue? (Y/n): ').strip().lower()
-            if answer == 'y' or answer == 'yes' or answer == '':
+            if answer in ('y', 'yes', ''):
                 break
-            elif answer == 'n' or answer == 'no':
+            elif answer in ('n', 'no'):
                 logging.info("User opted to reselect folders.")
                 mt4_folder = self.get_folder_via_dialog('Select folder to analyze Candle Data-MT4')
-                if not mt4_folder:
+                if mt4_folder is None:
                     raise FileNotFoundError("MT4 folder selection was canceled.")
                 mt5_folder = self.get_folder_via_dialog('Select folder to analyze Candle Data-MT5')
-                if not mt5_folder:
+                if mt5_folder is None:
                     raise FileNotFoundError("MT5 folder selection was canceled.")
                 break
             else:
                 print("Invalid input. Please enter 'y' or 'n'.")
-
-        logging.info(f"Selected folders: MT4: {mt4_folder}, MT5: {mt5_folder}")
         return mt4_folder, mt5_folder
 
-    def _load_spread(self):
+    def _load_spread(self) -> None:
+        """
+        Loads spread information from Excel files located in the Spread_Files folder.
+        """
         for file in (self.data_path / "Spread_Files").glob('*.xlsx'):
-            self.spread[file.stem] = pd.read_excel(file, skiprows=1)['Normal spread(Point)'][0]
+            try:
+                df = pd.read_excel(file, skiprows=1)
+                if 'Normal spread(Point)' in df.columns and not df.empty:
+                    self.spread[file.stem] = df['Normal spread(Point)'].iloc[0]
+                else:
+                    logging.warning(f"Spread column missing or empty in {file}")
+            except Exception as e:
+                logging.error(f"Error loading spread from {file}: {e}")
 
     def __run__(self):
-        """Initialize data by loading symbol, spreads, candles, and report."""
+        """
+        Main method to run the QC analysis.
+        Loads spread data, processes MT4 and MT5 folders, and reports any found issues.
+        """
         logging.info('Data Analysis Started.')
         self._load_spread()
-        mt4_folder, mt5_folder = self.default_mt4, self.default_mt5
-        if not self.debug:
-            mt4_folder, mt5_folder = self._get_folders_via_dialog()
 
-        for symbol_path in tqdm([d for d in mt4_folder.iterdir() if d.is_dir()], desc=f"MT 4: {mt4_folder.name}"):
-            columns = ['time', 'open', 'high', 'low', 'close', 'volume']
-            data_frames = self._read_symbol_folder_data(symbol_path, columns)
-            for time_frame, df in data_frames.items():
-                self._single_file_analysis(symbol_path, df, time_frame)
-            self._multi_file_analysis(symbol_path, data_frames)
+        mt4_folder, mt5_folder = (self.default_mt4, self.default_mt5) if self.debug else self._get_folders_via_dialog()
 
-        time.sleep(.1)
-        for symbol_path in tqdm([d for d in mt5_folder.iterdir() if d.is_dir()], desc=f"MT 5: {mt4_folder.name}"):
-            columns = ['time', 'open', 'high', 'low', 'close', 'tick volume', 'volume', 'spread']
-            data_frames = self._read_symbol_folder_data(symbol_path, columns)
-            for time_frame, df in data_frames.items():
-                self._single_file_analysis(symbol_path, df, time_frame)
-            self._multi_file_analysis(symbol_path, data_frames)
+        # Process MT4 data
+        self._process_folder(mt4_folder, is_mt5=False)
+        time.sleep(0.1)
+        # Process MT5 data
+        self._process_folder(mt5_folder, is_mt5=True)
+        time.sleep(0.1)
 
-        time.sleep(.1)
         logging.info('Data Analysis complete.')
         for path, flags in self.red_flags.items():
-            if not flags:
-                continue
-            print(f'ERRORS: {path}')
-            for each in flags:
-                print(f'\t- {each}')
+            if flags:
+                print(f'ERRORS: {path}')
+                for msg in flags:
+                    print(f'\t- {msg}')
 
-    def _read_symbol_folder_data(self, folder: Path, columns: List[str]) ->  Dict[int, pd.DataFrame]:
-        def find_invalid_time_rows(time_series: pd.Series, date_format: str = "%d.%m.%Y %H:%M:%S.%f") -> List[Hashable]:
-            """Find indices of rows with invalid time formats."""
-            _invalid_indices = []
-            for idx, value in time_series.items():
-                try:
-                    pd.to_datetime(value, format=date_format, dayfirst=True)
-                except ValueError:
-                    _invalid_indices.append(idx)
-            return _invalid_indices
+    def _process_folder(self, folder: Path, is_mt5: bool) -> None:
+        """
+        Processes a folder containing symbol subdirectories.
 
-        result = {}
+        :param folder: The folder path (MT4 or MT5).
+        :param is_mt5: Flag to indicate if the folder is for MT5 data.
+        """
+        file_desc = "MT 5" if is_mt5 else "MT 4"
+        columns = (
+            ['time', 'open', 'high', 'low', 'close', 'tick volume', 'volume', 'spread']
+            if is_mt5 else ['time', 'open', 'high', 'low', 'close', 'volume']
+        )
+        for symbol_path in tqdm([d for d in folder.iterdir() if d.is_dir()], desc=f"{file_desc}: {folder.name}"):
+            data_frames = self._read_symbol_folder_data(symbol_path, columns)
+            for timeframe, df in data_frames.items():
+                self._single_file_analysis(symbol_path, df, timeframe)
+            self._multi_file_analysis(symbol_path, data_frames)
+            break
+
+    def _read_symbol_folder_data(self, folder: Path, columns: List[str]) -> Dict[int, pd.DataFrame]:
+        """
+        Reads and validates candle data files from a symbol folder.
+
+        :param folder: Path to the symbol folder.
+        :param columns: Expected column names.
+        :return: Dictionary mapping timeframe to DataFrame.
+        """
+
+        def find_invalid_time_rows(series: pd.Series, date_format: str = "%d.%m.%Y %H:%M:%S.%f") -> List[int]:
+            # Vectorized conversion: invalid rows become NaT.
+            converted = pd.to_datetime(series, format=date_format, errors='coerce', dayfirst=True)
+            return series.index[converted.isna()].tolist()
+
+        result: Dict[int, pd.DataFrame] = {}
         valid_files = set()
         parts = folder.name.split('-', 1)
 
-        # Generate valid file names based on the expected pattern
-        for t in tqdm([1, 5, 15, 30, 60, 240, 1440], desc='Read Candle Data File'):
-            if len(parts) > 1:
-                file_name = f'{parts[0]}-{t}-{parts[1]}.csv'
-            else:
-                file_name = f'{parts[0]}-{t}.csv'
+        for t in TIMEFRAMES:
+            file_name = f'{parts[0]}-{t}-{parts[1]}.csv' if len(parts) > 1 else f'{parts[0]}-{t}.csv'
             valid_files.add(file_name)
             candle_path = folder / file_name
             if not candle_path.exists():
-                self.red_flags[folder].append(f'Candle Data is missing: {candle_path}')
-            else:
-                try:
-                    df = pd.read_csv(candle_path, header=None)
-                    # Validate the header of the DataFrame
-                    try:
-                        df.columns = columns
-                    except ValueError as e:
-                        self.red_flags[candle_path].append(f"Missing required columns: {e}")
+                self.red_flags[folder].append(f"Missing Candle Data file: {candle_path}")
+                continue
 
-                    # Validate the time column for correct date format.
-                    try:
-                        df['time'] = pd.to_datetime(df['time'], format="%d.%m.%Y %H:%M:%S.%f", dayfirst=True)
-                    except ValueError:
-                        invalid_indices = find_invalid_time_rows(df['time'])
-                        self.red_flags[candle_path].append(f"Rows with invalid time format: {invalid_indices}")
+            try:
+                df = pd.read_csv(candle_path, header=None)
+                if len(df.columns) != len(columns):
+                    self.red_flags[candle_path].append(f"Expected {len(columns)} columns, found {len(df.columns)}")
+                df.columns = columns[:len(df.columns)]
+                df['time'] = pd.to_datetime(df['time'], format="%d.%m.%Y %H:%M:%S.%f",
+                                            errors='coerce', dayfirst=True)
+                invalid_indices = df.index[df['time'].isna()].tolist()
+                if invalid_indices:
+                    self.red_flags[candle_path].append(f"Invalid time format in rows: {invalid_indices}")
+                result[t] = df.sort_values(by='time')
+            except Exception as e:
+                self.red_flags[folder].append(f"Failed to read file {candle_path}: {e}")
 
-                    result[t] = df.sort_values(by='time')
-
-                except Exception as e:
-                    self.red_flags[folder].append(f"Failed to Read file: {e}")
-
-        # Check for extra files
+        # Report any extra unexpected files.
         all_files = {f.name for f in folder.iterdir() if f.is_file()}
         extra_files = all_files - valid_files
         if extra_files:
             for extra_file in extra_files:
-                self.red_flags[folder].append(f'Unexpected file found: {extra_file}')
+                self.red_flags[folder].append(f"Unexpected file found: {extra_file}")
         return result
 
-    def _single_file_analysis(self, path: Path, df: pd.DataFrame, time_frame: int):
+    def _single_file_analysis(self, path: Path, df: pd.DataFrame, timeframe: int) -> None:
+        """
+        Performs analysis on a single timeframe file.
+
+        :param path: Path to the symbol folder.
+        :param df: DataFrame containing candle data.
+        :param timeframe: Timeframe of the data.
+        """
         df = df.copy()
 
-        # Find the indices of empty rows
-        empty_row_indices = df[df.isnull().all(axis=1)].index
-        if not empty_row_indices.empty:
-            self.red_flags[path].append(f"TF: {time_frame}, Indices of empty rows: {list(empty_row_indices)}")
+        # Check for empty rows and columns.
+        empty_rows = df.index[df.isna().all(axis=1)].tolist()
+        if empty_rows:
+            self.red_flags[path].append(f"TF: {timeframe}, Empty rows at indices: {empty_rows}")
+        empty_cols = df.columns[df.isna().all()].tolist()
+        if empty_cols:
+            self.red_flags[path].append(f"TF: {timeframe}, Empty columns at indices: {empty_cols}")
 
-        # Find the indices of empty columns
-        empty_column_indices = df.columns[df.isnull().all()]
-        if len(empty_column_indices) > 0:
-            self.red_flags[path].append(f"TF: {time_frame}, Indices of empty columns: {list(empty_column_indices)}")
+        # Check for duplicate rows.
+        duplicate_rows = df.index[df.duplicated()].tolist()
+        if duplicate_rows:
+            self.red_flags[path].append(f"TF: {timeframe}, Duplicate rows at indices: {duplicate_rows}")
 
-        # Find the indices of duplicate rows
-        duplicate_indices = df[df.duplicated()].index
-        if not duplicate_indices.empty:
-            self.red_flags[path].append(f"TF: {time_frame}, Indices of duplicate rows: {list(duplicate_indices)}")
+        # Validate high and low values relative to open, close.
+        invalid_candles = df.index[
+            (df['high'] != df[['open', 'high', 'low', 'close']].max(axis=1)) |
+            (df['low'] != df[['open', 'high', 'low', 'close']].min(axis=1))
+            ].tolist()
+        if invalid_candles:
+            self.red_flags[path].append(f"TF: {timeframe}, Incorrect candle data at indices: {invalid_candles}")
 
-        # Check High and Low value
-        high_is_max = (df['high'] != df[['open', 'high', 'low', 'close']].max(axis=1))
-        low_is_min = (df['low'] != df[['open', 'high', 'low', 'close']].min(axis=1))
-        for idx in sorted(set(high_is_max[high_is_max].index) | set(low_is_min[low_is_min].index)):
-            self.red_flags[path].append(f"TF: {time_frame}, Wrong Candle Data in Index {idx}")
-
-        # check volume
-        if time_frame != 1:
-            last_volume = df['volume'].copy()
+        # Check and update volume (for non 1-minute timeframes).
+        if timeframe != 1:
+            original_volume = df['volume'].copy()
             df['volume'] = df['volume'].replace(1, 2)
-            if not (last_volume == df['volume']).all():
-                self.red_flags[path].append(f'TF: {time_frame}, Volumes updated, Save to {path}')
-                df.to_csv(path, header=False, index=False)
+            if not original_volume.equals(df['volume']):
+                self.red_flags[path].append(f"TF: {timeframe}, Volume values updated.")
+                if self.save_after_update:
+                    df.to_csv(path, header=False, index=False)
+                    self.red_flags[path].append(f"Saved changes to {path}")
 
-        # check the gap between candle
+        # Analyze gaps and calculate volatility metrics.
         df['prev_close'] = df['close'].shift(1)
         df['prev_time'] = df['time'].shift(1)
         df['time_diff'] = (df['time'] - df['prev_time']).dt.total_seconds() / 60
@@ -219,42 +247,44 @@ class QCChecker(MainClass):
         df['ATR'] = df['TR'].rolling(window=14).mean()
         df['ATR_Multi'] = df['ATR'] * self.multiplier
         df['Diff'] = abs(df['prev_close'] - df['open'])
+        gap_indices = df.index[(df['Diff'] > df['ATR_Multi']) & (df['time_diff'] <= 15)].tolist()
+        if gap_indices:
+            self.red_flags[path].append(f"TF: {timeframe}, Unusual gap detected at indices: {gap_indices}")
 
-        big_gap = df[(df['Diff'] > df['ATR_Multi']) & (df['time_diff'] <= 15)]
-        if not big_gap.empty:
-            self.red_flags[path].append(f'TF: {time_frame}, Index with Unnormal Gap: {big_gap.index}')
-
-        # check weekend candle
+        # Check weekend candles.
         df['day_of_week'] = df['time'].dt.dayofweek
-        weekend_data = df[(df['day_of_week'] == 5) | (df['day_of_week'] == 6)]
-        if self.is_gmt and len(weekend_data) > self.weekend_candle.get(time_frame):
+        weekend_data = df[df['day_of_week'].isin([5, 6])]
+        max_weekend = WEEKEND_CANDLE.get(timeframe, 0) if self.is_gmt else 0
+        if len(weekend_data) > max_weekend:
             self.red_flags[path].append(
-                f"TF: {time_frame}, Data exists for Saturdays and/or Sundays. Count: {len(weekend_data)}, Max: "
-                f"{self.weekend_candle.get(time_frame)}, Details: {weekend_data.index}")
-        elif not self.is_gmt and not weekend_data.empty:
-            self.red_flags[path].append(
-                f"TF: {time_frame}, Data exists for Saturdays and/or Sundays. Count: {len(weekend_data)}, Max: 0, "
-                f"Details: {weekend_data.index}")
+                f"TF: {timeframe}, Weekend data count {len(weekend_data)} exceeds maximum {max_weekend}. "
+                f"Indices: {weekend_data.index.tolist()}"
+            )
 
-        # check spread
+        # Validate spread if applicable.
         if 'spread' in df.columns:
             symbol_name = path.stem.split('-')[0]
-            spread = self.spread.get(symbol_name, None)
-            if spread is None:
-                self.red_flags[path].append(f"TF: {time_frame}, Can not find spread for Symbol {symbol_name}")
+            valid_spread = self.spread.get(symbol_name)
+            if valid_spread is None:
+                self.red_flags[path].append(f"TF: {timeframe}, Spread not found for symbol {symbol_name}")
             else:
-                wrong_spread = df[df['spread'] != spread]
-                if not wrong_spread.empty:
-                    self.red_flags[path].append(f"TF: {time_frame}, Wrong spread, Valid: {spread}, "
-                                                f"Index: {wrong_spread.index}")
+                wrong_spread_idx = df.index[df['spread'] != valid_spread].tolist()
+                if wrong_spread_idx:
+                    self.red_flags[path].append(
+                        f"TF: {timeframe}, Incorrect spread (expected {valid_spread}) at indices: {wrong_spread_idx}"
+                    )
 
-    def _multi_file_analysis(self, path: Path, dfs: Dict[int, pd.DataFrame]):
-        # Check start times
-        start_times = [(i, df['time'].iloc[0].date()) for i, df in dfs.items()]
-        if len(set(t for _, t in start_times)) != 1:
-            self.red_flags[path].append(f"TimeFrames Data do not start at the same datetime. Details: {start_times}")
+    def _multi_file_analysis(self, path: Path, dfs: Dict[int, pd.DataFrame]) -> None:
+        """
+        Performs cross-file analysis to check for consistency in start and end dates across timeframes.
 
-        # Check end times
-        end_times = [(i, df['time'].iloc[-1].date()) for i, df in dfs.items()]
-        if len(set(t for _, t in end_times)) != 1:
-            self.red_flags[path].append(f"TimeFrames Data do not end at the same datetime. Details: {end_times}")
+        :param path: Path to the symbol folder.
+        :param dfs: Dictionary of DataFrames keyed by timeframe.
+        """
+        start_times = [(tf, df['time'].iloc[0].date()) for tf, df in dfs.items() if not df.empty]
+        if len({date for _, date in start_times}) > 1:
+            self.red_flags[path].append(f"Inconsistent start dates across timeframes: {start_times}")
+
+        end_times = [(tf, df['time'].iloc[-1].date()) for tf, df in dfs.items() if not df.empty]
+        if len({date for _, date in end_times}) > 1:
+            self.red_flags[path].append(f"Inconsistent end dates across timeframes: {end_times}")
