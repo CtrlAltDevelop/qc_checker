@@ -41,11 +41,11 @@ class QCChecker(MainClass):
         self.config.read(self.base_path / 'settings.ini')
 
         # Read configuration values from INI
-        self.is_gmt = self.config.getboolean("Files", "TimeZoneGMT", fallback=False)
+        self.is_gmt = self.config.getboolean("Files", "TimeZoneGMT")
         self.default_mt4 = Path(self.config.get("Files", "MT4"))
         self.default_mt5 = Path(self.config.get("Files", "MT5"))
-        self.multiplier = self.config.getfloat("ATR", "Multiplier", fallback=3)
-        self.save_after_update = self.config.getboolean("Volume", "SaveAfterUpdate", fallback=True)
+        self.multiplier = self.config.getfloat("ATR", "Multiplier")
+        self.save_after_update = self.config.getboolean("Volume", "SaveAfterUpdate")
 
         self.red_flags: Dict[Path, List[str]] = defaultdict(list)
         self.spread: Dict[str, float] = {}
@@ -317,19 +317,12 @@ class QCChecker(MainClass):
                 logging.error(f"Error processing red flags for {symbol_path}: {e}")
 
         # Prepare a header with additional details.
-        header_lines = [
-            "=" * 50,
-            f"Red Flag Report for Symbol: {symbol_path.name}",
-            f"Report generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Total issues found: {total_issues}",
-            "=" * 50,
-            ""
-        ]
-        header = "\n".join(header_lines)
-        full_message = header + "\n\n" + "\n\n".join(details)
-
+        header = "\n".join(["=" * 50, f"Red Flag Report for Symbol: {symbol_path.name}",
+                            f"Report generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                            f"Total issues found: {total_issues}", "=" * 50, ""])
         if details:
-            output_file = self.result_path / f"{symbol_path.name}_red_flags.txt"
+            (self.result_path / symbol_path.parent.name).mkdir(exist_ok=True)
+            output_file = self.result_path / symbol_path.parent.name /f"{symbol_path.name}_red_flags.txt"
             with open(output_file, "w") as f:
-                f.write(full_message)
+                f.write(header + "\n\n" + "\n\n".join(details))
             logging.info(f"Saved red flags for {symbol_path} to {output_file}")
