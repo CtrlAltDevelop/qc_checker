@@ -11,6 +11,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from source.common.main_class import MainClass
+from source.features.dukas_data import DukasData
 
 # Define common timeframes as a constant.
 TIMEFRAMES = [1, 5, 15, 30, 60, 240, 1440]
@@ -35,6 +36,9 @@ class QCChecker(MainClass):
         self.data_path = self.base_path / "data"
         self.result_path = self.base_path / "results"
         self.result_path.mkdir(parents=True, exist_ok=True)
+
+        # class implement
+        self.dukas = DukasData(self.result_path)
 
         # Read INI configuration
         self.config = configparser.ConfigParser()
@@ -174,8 +178,8 @@ class QCChecker(MainClass):
                 if len(df.columns) != len(columns):
                     self.red_flags[candle_path].append(f"Expected {len(columns)} columns, found {len(df.columns)}")
                 df.columns = columns[:len(df.columns)]
-                df['time'] = pd.to_datetime(df['time'], format="%d.%m.%Y %H:%M:%S.%f",
-                                            errors='coerce', dayfirst=True)
+                df['time'] = \
+                    pd.to_datetime(df['time'], format="%d.%m.%Y %H:%M:%S.%f", errors='coerce', dayfirst=True)
                 invalid_indices = df.index[df['time'].isna()].tolist()
                 if invalid_indices:
                     self.red_flags[candle_path].append(f"Invalid time format in rows: {invalid_indices}")
@@ -286,6 +290,60 @@ class QCChecker(MainClass):
         if len({date for _, date in end_times}) > 1:
             self.red_flags[path].append(f"Inconsistent end dates across timeframes: {end_times}")
 
+    def _validate_data_by_server(self, df: pd.DataFrame, tf: int) -> None:
+        # Create helper columns for date-only and grouping by month
+        df['date_only'] = df['time'].dt.date
+        df['year_month'] = df['time'].dt.to_period('M')
+
+        result = {}
+
+        # Process each month group
+        for period, group in df.groupby('year_month'):
+            # Get unique days (as Python date objects) in sorted order using NumPy
+            unique_days = np.array(sorted(set(group['date_only'])))
+            if unique_days.size == 0:
+                continue
+
+            # Convert unique days to a pandas DatetimeIndex to easily compute weekdays
+            unique_days_dt = pd.to_datetime(unique_days)
+            # Build a boolean mask: weekdays are those with weekday() 0 (Monday) to 4 (Friday)
+            is_weekday = unique_days_dt.weekday < 5
+            weekdays = unique_days[is_weekday]
+
+            # Select first and last trading days in the month from the unique days
+            first_date = unique_days[0]
+            last_date = unique_days[-1]
+
+            # From the weekdays list, exclude the first and last dates (if they are weekdays) for random selection
+            if weekdays.size > 0:
+                candidate_mask = (weekdays != first_date) & (weekdays != last_date)
+                candidate_dates = weekdays[candidate_mask]
+            else:
+                candidate_dates = np.array([], dtype=unique_days.dtype)
+
+            # Randomly sample 3 candidate dates if available, otherwise take all candidates
+            if candidate_dates.size >= 3:
+                random_dates = np.random.choice(candidate_dates, 3, replace=False)
+            else:
+                random_dates = candidate_dates
+
+            # Combine first, last, and the random selected days and sort them
+            selected_dates = np.sort(np.unique(np.concatenate(([first_date, last_date], random_dates))))
+
+            # For each selected day, filter the trades and drop the helper columns before storing in result
+            for sel in selected_dates:
+                # Format key as 'YYYY-MM-DD'
+                key = pd.to_datetime(sel).strftime('%Y-%m-%d')
+                # Filter rows where the date_only column equals the selected date
+                mask = df['date_only'] == sel
+                trades = df.loc[mask].copy()
+                trades.drop(columns=['year_month', 'date_only'], inplace=True)
+                result[key] = trades
+
+        # Print the result dictionary where each key is a selected date and its value is the corresponding trades DataFrame
+        for _date, _df in result.items():
+            print(_date, len(_df))
+
     def _save_red_flags_for_symbol(self, symbol_path: Path) -> None:
         """
         Saves all red flags related to the given symbol folder to a text file.
@@ -306,11 +364,9 @@ class QCChecker(MainClass):
                         total_issues += len(flags)
                         # Format the file header.
                         file_report = f"-----\nFile: {path}\n-----\n"
-                        # Wrap each flag message to 80 characters.
-                        wrapped_flags = "\n".join(
-                            f"  • {textwrap.fill(flag, width=80, subsequent_indent='    ')}"
-                            for flag in flags
-                        )
+                        # Wrap each flag message to 120 characters.
+                        wrapped_flags = "\n".join(f"  • {textwrap.fill(flag, width=120, subsequent_indent='    ')}"
+                                                  for flag in flags)
                         file_report += wrapped_flags
                         details.append(file_report)
             except Exception as e:
