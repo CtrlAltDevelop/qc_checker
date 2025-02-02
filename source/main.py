@@ -1,6 +1,8 @@
 import time
 import logging
 import configparser
+import datetime  # For timestamping the report.
+import textwrap  # For wrapping long lines.
 from collections import defaultdict
 from pathlib import Path
 from typing import Tuple, List, Dict
@@ -55,7 +57,6 @@ class QCChecker(MainClass):
 
         :return: A tuple containing paths for the MT4 and MT5 folders.
         """
-
         def get_folder(default_folder: Path, prompt_msg: str) -> Path:
             if default_folder.exists():
                 return default_folder
@@ -106,7 +107,7 @@ class QCChecker(MainClass):
     def __run__(self):
         """
         Main method to run the QC analysis.
-        Loads spread data, processes MT4 and MT5 folders, and reports any found issues.
+        Loads spread data, processes MT4 and MT5 folders, and reports/saves any found issues.
         """
         logging.info('Data Analysis Started.')
         self._load_spread()
@@ -121,6 +122,7 @@ class QCChecker(MainClass):
         time.sleep(0.1)
 
         logging.info('Data Analysis complete.')
+        # Optionally, print combined red flags.
         for path, flags in self.red_flags.items():
             if flags:
                 print(f'ERRORS: {path}')
@@ -144,7 +146,8 @@ class QCChecker(MainClass):
             for timeframe, df in data_frames.items():
                 self._single_file_analysis(symbol_path, df, timeframe)
             self._multi_file_analysis(symbol_path, data_frames)
-            break
+            # Save red flags for this symbol folder after processing.
+            self._save_red_flags_for_symbol(symbol_path)
 
     def _read_symbol_folder_data(self, folder: Path, columns: List[str]) -> Dict[int, pd.DataFrame]:
         """
@@ -171,7 +174,8 @@ class QCChecker(MainClass):
                 if len(df.columns) != len(columns):
                     self.red_flags[candle_path].append(f"Expected {len(columns)} columns, found {len(df.columns)}")
                 df.columns = columns[:len(df.columns)]
-                df['time'] = pd.to_datetime(df['time'], format="%d.%m.%Y %H:%M:%S.%f", errors='coerce', dayfirst=True)
+                df['time'] = pd.to_datetime(df['time'], format="%d.%m.%Y %H:%M:%S.%f",
+                                            errors='coerce', dayfirst=True)
                 invalid_indices = df.index[df['time'].isna()].tolist()
                 if invalid_indices:
                     self.red_flags[candle_path].append(f"Invalid time format in rows: {invalid_indices}")
@@ -214,7 +218,7 @@ class QCChecker(MainClass):
         invalid_candles = df.index[
             (df['high'] != df[['open', 'high', 'low', 'close']].max(axis=1)) |
             (df['low'] != df[['open', 'high', 'low', 'close']].min(axis=1))
-            ].tolist()
+        ].tolist()
         if invalid_candles:
             self.red_flags[path].append(f"TF: {timeframe}, Incorrect candle data at indices: {invalid_candles}")
 
@@ -281,3 +285,51 @@ class QCChecker(MainClass):
         end_times = [(tf, df['time'].iloc[-1].date()) for tf, df in dfs.items() if not df.empty]
         if len({date for _, date in end_times}) > 1:
             self.red_flags[path].append(f"Inconsistent end dates across timeframes: {end_times}")
+
+    def _save_red_flags_for_symbol(self, symbol_path: Path) -> None:
+        """
+        Saves all red flags related to the given symbol folder to a text file.
+        The file is saved in the results folder with the name <symbol>_red_flags.txt.
+        The report includes a header with generation timestamp, summary counts, and detailed sections for each file.
+        Long lines are wrapped for readability.
+
+        :param symbol_path: The path of the symbol folder.
+        """
+        messages = []
+        total_issues = 0
+        details = []
+        # Gather red flags for files that are either the symbol folder or within it.
+        for path, flags in self.red_flags.items():
+            try:
+                if path == symbol_path or symbol_path in path.parents:
+                    if flags:
+                        total_issues += len(flags)
+                        # Format the file header.
+                        file_report = f"-----\nFile: {path}\n-----\n"
+                        # Wrap each flag message to 80 characters.
+                        wrapped_flags = "\n".join(
+                            f"  • {textwrap.fill(flag, width=80, subsequent_indent='    ')}"
+                            for flag in flags
+                        )
+                        file_report += wrapped_flags
+                        details.append(file_report)
+            except Exception as e:
+                logging.error(f"Error processing red flags for {symbol_path}: {e}")
+
+        # Prepare a header with additional details.
+        header_lines = [
+            "=" * 50,
+            f"Red Flag Report for Symbol: {symbol_path.name}",
+            f"Report generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Total issues found: {total_issues}",
+            "=" * 50,
+            ""
+        ]
+        header = "\n".join(header_lines)
+        full_message = header + "\n\n" + "\n\n".join(details)
+
+        if details:
+            output_file = self.result_path / f"{symbol_path.name}_red_flags.txt"
+            with open(output_file, "w") as f:
+                f.write(full_message)
+            logging.info(f"Saved red flags for {symbol_path} to {output_file}")
