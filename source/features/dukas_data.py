@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Union
+
 import aiohttp
 import pandas as pd
 
@@ -38,6 +39,9 @@ ASK_CANDLE_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/ASK_candles_min
 class DukasData:
     def __init__(self, data_path: Union[str, Path]) -> None:
         self.data_path = Path(data_path)
+
+        self.aggregation = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}
+        self.timeframe_map = {5: '5min', 15: '15min', 30: '30min', 60: '1h', 240: '4h', 1440: '1d'}
 
     @staticmethod
     async def _download_file_async(url: str, file_path: Path) -> bytes:
@@ -145,8 +149,14 @@ class DukasData:
                 break
             try:
                 ts, open_i, high_i, low_i, close_i, volume = struct.unpack('!IIIIIf', record)
-                candles.append({'timestamp': base_time + pd.to_timedelta(ts, unit='s'), 'open': open_i / size,
-                                'high': high_i / size, 'low': low_i / size, 'close': close_i / size, 'volume': volume})
+                candles.append({
+                    'timestamp': base_time + pd.to_timedelta(ts, unit='s'),
+                    'open': open_i / size,
+                    'high': high_i / size,
+                    'low': low_i / size,
+                    'close': close_i / size,
+                    'volume': volume
+                })
             except Exception as e:
                 logging.error(f"Error parsing candle record {i}: {e}")
         return pd.DataFrame(candles)
@@ -175,9 +185,14 @@ class DukasData:
                 break
             try:
                 ts_ms, ask_i, bid_i, ask_vol, bid_vol = struct.unpack('!IIIff', record)
-                ticks.append({'timestamp': base_time + pd.to_timedelta(ts_ms, unit='ms'), 'ask': ask_i / size,
-                              'bid': bid_i / size, 'spread': (ask_i - bid_i) / size, 'ask_vol': ask_vol,
-                              'bid_vol': bid_vol})
+                ticks.append({
+                    'timestamp': base_time + pd.to_timedelta(ts_ms, unit='ms'),
+                    'ask': ask_i / size,
+                    'bid': bid_i / size,
+                    'spread': (ask_i - bid_i) / size,
+                    'ask_vol': ask_vol,
+                    'bid_vol': bid_vol
+                })
             except Exception as e:
                 logging.error(f"Error parsing tick record {i}: {e}")
         return pd.DataFrame(ticks)
@@ -213,3 +228,20 @@ class DukasData:
         raw_data = await self._get_tick_data_async(symbol, dt.year, dt.month, dt.day, dt.hour)
         decompressed = self._decompress_data(raw_data)
         return self._parse_tick_data(symbol, decompressed, dt.year, dt.month, dt.day, dt.hour)
+
+    def get_candles(self, symbol: str, dt: datetime, timeframe: int = 1) -> pd.DataFrame:
+        """
+        Returns candle data for the given symbol and datetime at the requested timeframe.
+        For '1m', the raw data is downloaded and for higher timeframes, 1-minute data is aggregated
+        using pandas resample.
+        Supported timeframes: 1, 5, 15, 30, 60, 240, 1440
+        """
+        df_1m = self.get_candle_data(symbol, dt, source='BID')
+        if timeframe == 1:
+            return df_1m
+
+        df = df_1m.copy().set_index('timestamp').sort_index()
+
+        if timeframe not in self.timeframe_map:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
+        return df.resample(self.timeframe_map[timeframe]).agg(self.aggregation).dropna().reset_index()
