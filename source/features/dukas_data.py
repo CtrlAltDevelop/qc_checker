@@ -5,41 +5,42 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Union
-
 import aiohttp
 import pandas as pd
 
 
-class DukasData:
-    HEADER = {
-        'Accept': '*/*',
-        'Accept-Encoding': 'gzip, deflate, br, zstd',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Origin': 'https://freeserv.dukascopy.com',
-        'Priority': 'u=1, i',
-        'Referer': 'https://freeserv.dukascopy.com/',
-        'Sec-Ch-Ua': 'https://freeserv.dukascopy.com/',
-        'Sec-Ch-Ua-Mobile': '?0',
-        'Sec-Ch-Ua-Platform': 'Windows',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-site',
-        'User-Agent': (
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-            'AppleWebKit/537.36 (KHTML, like Gecko) '
-            'Chrome/132.0.0.0 Safari/537.36'
-        )
-    }
-    SERVER = 'https://www.dukascopy.com/datafeed'
-    TICK_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/{hour:02d}h_ticks.bi5"
-    BID_CANDLE_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/BID_candles_min_1.bi5"
-    ASK_CANDLE_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/ASK_candles_min_1.bi5"
+HEADER = {
+    'Accept': '*/*',
+    'Accept-Encoding': 'gzip, deflate, br, zstd',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Origin': 'https://freeserv.dukascopy.com',
+    'Priority': 'u=1, i',
+    'Referer': 'https://freeserv.dukascopy.com/',
+    'Sec-Ch-Ua': 'https://freeserv.dukascopy.com/',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': 'Windows',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-site',
+    'User-Agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/132.0.0.0 Safari/537.36'
+    )
+}
 
+SERVER = 'https://www.dukascopy.com/datafeed'
+TICK_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/{hour:02d}h_ticks.bi5"
+BID_CANDLE_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/BID_candles_min_1.bi5"
+ASK_CANDLE_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/ASK_candles_min_1.bi5"
+
+
+class DukasData:
     def __init__(self, data_path: Union[str, Path]) -> None:
         self.data_path = Path(data_path)
 
-    @classmethod
-    async def _download_file_async(cls, url: str, file_path: Path) -> bytes:
+    @staticmethod
+    async def _download_file_async(url: str, file_path: Path) -> bytes:
         """
         Asynchronously downloads a file from the given URL.
         If the file exists locally, its contents are returned immediately.
@@ -53,7 +54,7 @@ class DukasData:
             while True:
                 try:
                     logging.info(f"Requesting URL: {url}")
-                    async with session.get(url, headers=cls.HEADER) as response:
+                    async with session.get(url, headers=HEADER) as response:
                         if response.status == 200:
                             data = await response.read()
                             file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,7 +77,7 @@ class DukasData:
         The provided month is 1-indexed (e.g. January = 1) and is converted to 0-indexed.
         """
         # Dukascopy expects 0-indexed months
-        url = self.TICK_URL.format(server=self.SERVER, symbol=symbol, year=year, month=month - 1, day=day, hour=hour)
+        url = TICK_URL.format(server=SERVER, symbol=symbol, year=year, month=month - 1, day=day, hour=hour)
         file_path = self.data_path / symbol / f"{year:04d}" / f"{month:02d}" / f"{day:02d}" / f"{hour:02d}h_ticks.bi5"
         return await self._download_file_async(url, file_path)
 
@@ -88,12 +89,12 @@ class DukasData:
             source (str): 'BID' or 'ASK'
         """
         candle_type = source.upper()
-        date = dict(server=self.SERVER, symbol=symbol, year=year, month=month - 1, day=day)
+        date = dict(server=SERVER, symbol=symbol, year=year, month=month - 1, day=day)
         if candle_type == 'BID':
-            url = self.BID_CANDLE_URL.format(**date)
+            url = BID_CANDLE_URL.format(**date)
             file_path = self.data_path / symbol / f"{year:04d}_{month:02d}_{day:02d}_bid_m1_candles.bi5"
         elif candle_type == 'ASK':
-            url = self.ASK_CANDLE_URL.format(**date)
+            url = ASK_CANDLE_URL.format(**date)
             file_path = self.data_path / symbol / f"{year:04d}_{month:02d}_{day:02d}_ask_m1_candles.bi5"
         else:
             raise ValueError("source must be either 'BID' or 'ASK'")
@@ -173,7 +174,6 @@ class DukasData:
             if len(record) < record_size:
                 break
             try:
-                # Using network byte order (!) and five unsigned ints
                 ts_ms, ask_i, bid_i, ask_vol, bid_vol = struct.unpack('!IIIff', record)
                 ticks.append({'timestamp': base_time + pd.to_timedelta(ts_ms, unit='ms'), 'ask': ask_i / size,
                               'bid': bid_i / size, 'spread': (ask_i - bid_i) / size, 'ask_vol': ask_vol,
