@@ -2,7 +2,7 @@ import asyncio
 import lzma
 import struct
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 from typing import Union
 
@@ -197,14 +197,14 @@ class DukasData:
                 logging.error(f"Error parsing tick record {i}: {e}")
         return pd.DataFrame(ticks)
 
-    def get_candle_data(self, symbol: str, dt: datetime, source: str = 'BID') -> pd.DataFrame:
+    def get_candle_data(self, symbol: str, dt: date, source: str = 'BID') -> pd.DataFrame:
         """
-        Synchronous wrapper that downloads and parses candle data for the given symbol and datetime.
+        Synchronous wrapper that downloads and parses candle data for the given symbol and date.
         Internally it calls the asynchronous method using asyncio.run.
         """
         return asyncio.run(self.get_candle_data_async(symbol, dt, source))
 
-    async def get_candle_data_async(self, symbol: str, dt: datetime, source: str = 'BID') -> pd.DataFrame:
+    async def get_candle_data_async(self, symbol: str, dt: date, source: str = 'BID') -> pd.DataFrame:
         """
         Asynchronously downloads, decompresses, and parses candle data for the given symbol and datetime.
         The source parameter can be 'BID' or 'ASK'.
@@ -229,9 +229,9 @@ class DukasData:
         decompressed = self._decompress_data(raw_data)
         return self._parse_tick_data(symbol, decompressed, dt.year, dt.month, dt.day, dt.hour)
 
-    def get_candles(self, symbol: str, dt: datetime, timeframe: int = 1) -> pd.DataFrame:
+    def get_candles(self, symbol: str, dt: date, timeframe: int = 1) -> pd.DataFrame:
         """
-        Returns candle data for the given symbol and datetime at the requested timeframe.
+        Returns candle data for the given symbol and date at the requested timeframe.
         For '1m', the raw data is downloaded and for higher timeframes, 1-minute data is aggregated
         using pandas resample.
         Supported timeframes: 1, 5, 15, 30, 60, 240, 1440
