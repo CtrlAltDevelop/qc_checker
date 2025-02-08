@@ -32,8 +32,8 @@ HEADER = {
 
 SERVER = 'https://www.dukascopy.com/datafeed'
 TICK_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/{hour:02d}h_ticks.bi5"
-BID_CANDLE_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/BID_candles_min_1.bi5"
-ASK_CANDLE_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/ASK_candles_min_1.bi5"
+MIN_CANDLE_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/{source}_candles_min_1.bi5"
+HOUR_CANDLE_URL = "{server}/{symbol}/{year}/{month:02d}/{source}_candles_hour_1.bi5"
 
 
 class DukasData:
@@ -85,7 +85,7 @@ class DukasData:
         file_path = self.data_path / symbol / f"{year:04d}" / f"{month:02d}" / f"{day:02d}" / f"{hour:02d}h_ticks.bi5"
         return await self._download_file_async(url, file_path)
 
-    async def _get_candle_data_async(self, symbol: str, year: int, month: int, day: int, source: str) -> bytes:
+    async def _get_1m_candle_data_async(self, symbol: str, year: int, month: int, day: int, source: str) -> bytes:
         """
         Constructs the candle URL and downloads the candle data file asynchronously.
         The provided month is 1-indexed and is converted to 0-indexed.
@@ -93,15 +93,24 @@ class DukasData:
             source (str): 'BID' or 'ASK'
         """
         candle_type = source.upper()
-        date = dict(server=SERVER, symbol=symbol, year=year, month=month - 1, day=day)
-        if candle_type == 'BID':
-            url = BID_CANDLE_URL.format(**date)
-            file_path = self.data_path / symbol / f"{year:04d}_{month:02d}_{day:02d}_bid_m1_candles.bi5"
-        elif candle_type == 'ASK':
-            url = ASK_CANDLE_URL.format(**date)
-            file_path = self.data_path / symbol / f"{year:04d}_{month:02d}_{day:02d}_ask_m1_candles.bi5"
-        else:
+        if candle_type not in ('BID', 'ASK'):
             raise ValueError("source must be either 'BID' or 'ASK'")
+        url = MIN_CANDLE_URL.format(server=SERVER, symbol=symbol, year=year, month=month - 1, day=day, source=source)
+        file_path = self.data_path / symbol / f"{year:04d}_{month:02d}_{day:02d}_{source.lower()}_min_1_candles.bi5"
+        return await self._download_file_async(url, file_path)
+
+    async def _get_1h_candle_data_async(self, symbol: str, year: int, month: int, source: str) -> bytes:
+        """
+        Constructs the candle URL and downloads the candle data file asynchronously.
+        The provided month is 1-indexed and is converted to 0-indexed.
+        Parameter:
+            source (str): 'BID' or 'ASK'
+        """
+        candle_type = source.upper()
+        if candle_type not in ('BID', 'ASK'):
+            raise ValueError("source must be either 'BID' or 'ASK'")
+        url = HOUR_CANDLE_URL.format(server=SERVER, symbol=symbol, year=year, month=month - 1, source=source)
+        file_path = self.data_path / symbol / f"{year:04d}_{month:02d}_{source.lower()}_hour_1_candles.bi5"
         return await self._download_file_async(url, file_path)
 
     @staticmethod
@@ -122,7 +131,7 @@ class DukasData:
     def _get_contract_size(symbol: str) -> int:
         """
         Returns the contract size for the given symbol.
-        (For now, always returns 100000; modify if necessary.)
+        (For now, always returns 100,000; modify if necessary.)
         """
         return 100000
 
