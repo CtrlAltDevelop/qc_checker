@@ -7,6 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Tuple, List, Dict
 
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
@@ -290,59 +291,29 @@ class QCChecker(MainClass):
         if len({date for _, date in end_times}) > 1:
             self.red_flags[path].append(f"Inconsistent end dates across timeframes: {end_times}")
 
-    def _validate_data_by_server(self, df: pd.DataFrame, tf: int) -> None:
-        # Create helper columns for date-only and grouping by month
+    @staticmethod
+    def _get_sample_date_with_data(df: pd.DataFrame) -> Dict[datetime.date, pd.DataFrame]:
+        result = {}
         df['date_only'] = df['time'].dt.date
         df['year_month'] = df['time'].dt.to_period('M')
 
-        result = {}
-
-        # Process each month group
-        for period, group in df.groupby('year_month'):
-            # Get unique days (as Python date objects) in sorted order using NumPy
-            unique_days = np.array(sorted(set(group['date_only'])))
+        for period, group in df.groupby('year_month', observed=True):
+            unique_days = np.array(group['date_only'].unique(), dtype='datetime64[D]').astype('O')
             if unique_days.size == 0:
                 continue
 
-            # Convert unique days to a pandas DatetimeIndex to easily compute weekdays
-            unique_days_dt = pd.to_datetime(unique_days)
-            # Build a boolean mask: weekdays are those with weekday() 0 (Monday) to 4 (Friday)
-            is_weekday = unique_days_dt.weekday < 5
-            weekdays = unique_days[is_weekday]
+            weekdays = np.array([day for day in unique_days if day.weekday() in {0, 1, 2, 3, 4}])
+            first_date, last_date = unique_days[0], unique_days[-1]
+            candidate_dates = weekdays[(weekdays != first_date) & (weekdays != last_date)]
+            random_date = np.random.choice(candidate_dates, 1) if candidate_dates.size > 0 else []
+            for sel in np.unique(np.concatenate(([first_date, last_date], random_date))):
+                result[sel] = \
+                    group.loc[group['date_only'] == sel, group.columns.difference(['year_month', 'date_only'])]
+        return result
 
-            # Select first and last trading days in the month from the unique days
-            first_date = unique_days[0]
-            last_date = unique_days[-1]
-
-            # From the weekdays list, exclude the first and last dates (if they are weekdays) for random selection
-            if weekdays.size > 0:
-                candidate_mask = (weekdays != first_date) & (weekdays != last_date)
-                candidate_dates = weekdays[candidate_mask]
-            else:
-                candidate_dates = np.array([], dtype=unique_days.dtype)
-
-            # Randomly sample 3 candidate dates if available, otherwise take all candidates
-            if candidate_dates.size >= 3:
-                random_dates = np.random.choice(candidate_dates, 3, replace=False)
-            else:
-                random_dates = candidate_dates
-
-            # Combine first, last, and the random selected days and sort them
-            selected_dates = np.sort(np.unique(np.concatenate(([first_date, last_date], random_dates))))
-
-            # For each selected day, filter the trades and drop the helper columns before storing in result
-            for sel in selected_dates:
-                # Format key as 'YYYY-MM-DD'
-                key = pd.to_datetime(sel).strftime('%Y-%m-%d')
-                # Filter rows where the date_only column equals the selected date
-                mask = df['date_only'] == sel
-                trades = df.loc[mask].copy()
-                trades.drop(columns=['year_month', 'date_only'], inplace=True)
-                result[key] = trades
-
-        # Print the result dictionary where each key is a selected date and its value is the corresponding trades DataFrame
-        for _date, _df in result.items():
-            print(_date, len(_df))
+    def _validate_data_by_server(self, symbol: str, df: pd.DataFrame, tf: int) -> None:
+        for date, original_df in self._get_sample_date_with_data(df).items():
+            self.dukas.get_candles(symbol, date, tf)
 
     def _save_red_flags_for_symbol(self, symbol_path: Path) -> None:
         """
