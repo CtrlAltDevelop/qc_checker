@@ -1,10 +1,11 @@
 import asyncio
+import json
 import lzma
 import struct
 import logging
 from datetime import datetime, date
 from pathlib import Path
-from typing import Union
+from typing import Union, Dict
 
 import aiohttp
 import pandas as pd
@@ -43,6 +44,13 @@ class DukasData:
 
         self.aggregation = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}
         self.timeframe_map = {5: '5min', 15: '15min', 30: '30min', 60: '1h', 240: '4h', 1440: '1d'}
+        self.names: Dict[str, str] = {}
+
+        self._read_dukas_symbol_name()
+
+    def _read_dukas_symbol_name(self):
+        with open(self.data_path / "dukas.json") as f:
+            self.names = json.load(f)
 
     @staticmethod
     async def _download_file_async(url: str, file_path: Path) -> bytes:
@@ -219,6 +227,10 @@ class DukasData:
         Asynchronously downloads, decompresses, and parses candle data for the given symbol and datetime.
         The source parameter can be 'BID' or 'ASK'.
         """
+        if symbol not in self.names:
+            raise Exception(f"Symbol {symbol} not found.")
+        symbol = self.names[symbol]
+
         raw_data = await self._get_1m_candle_data_async(symbol, dt.year, dt.month, dt.day, source)
         decompressed = self._decompress_data(raw_data)
         return self._parse_candle_data(symbol, decompressed, dt.year, dt.month, dt.day)
@@ -235,6 +247,10 @@ class DukasData:
         Asynchronously downloads, decompresses, and parses candle data for the given symbol and datetime.
         The source parameter can be 'BID' or 'ASK'.
         """
+        if symbol not in self.names:
+            raise Exception(f"Symbol {symbol} not found.")
+        symbol = self.names[symbol]
+
         raw_data = await self._get_1h_candle_data_async(symbol, dt.year, dt.month, source)
         decompressed = self._decompress_data(raw_data)
         return self._parse_candle_data(symbol, decompressed, dt.year, dt.month, dt.day)
@@ -251,6 +267,10 @@ class DukasData:
         Asynchronously downloads, decompresses, and parses tick data for the given symbol and datetime.
         The dt.hour value is used as the base hour for tick offsets.
         """
+        if symbol not in self.names:
+            raise Exception(f"Symbol {symbol} not found.")
+        symbol = self.names[symbol]
+
         raw_data = await self._get_tick_data_async(symbol, dt.year, dt.month, dt.day, dt.hour)
         decompressed = self._decompress_data(raw_data)
         return self._parse_tick_data(symbol, decompressed, dt.year, dt.month, dt.day, dt.hour)
@@ -262,6 +282,10 @@ class DukasData:
         using pandas resample.
         Supported timeframes: 1, 5, 15, 30, 60, 240, 1440
         """
+        if symbol not in self.names:
+            raise Exception(f"Symbol {symbol} not found.")
+        symbol = self.names[symbol]
+
         if timeframe not in self.timeframe_map:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
         if timeframe in [1, 5, 15, 30]:
