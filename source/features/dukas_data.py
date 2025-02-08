@@ -31,6 +31,7 @@ HEADER = {
 }
 
 SERVER = 'https://www.dukascopy.com/datafeed'
+
 TICK_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/{hour:02d}h_ticks.bi5"
 MIN_CANDLE_URL = "{server}/{symbol}/{year}/{month:02d}/{day:02d}/{source}_candles_min_1.bi5"
 HOUR_CANDLE_URL = "{server}/{symbol}/{year}/{month:02d}/{source}_candles_hour_1.bi5"
@@ -206,19 +207,35 @@ class DukasData:
                 logging.error(f"Error parsing tick record {i}: {e}")
         return pd.DataFrame(ticks)
 
-    def get_candle_data(self, symbol: str, dt: date, source: str = 'BID') -> pd.DataFrame:
+    def get_1m_candle_data(self, symbol: str, dt: date, source: str = 'BID') -> pd.DataFrame:
         """
         Synchronous wrapper that downloads and parses candle data for the given symbol and date.
         Internally it calls the asynchronous method using asyncio.run.
         """
-        return asyncio.run(self.get_candle_data_async(symbol, dt, source))
+        return asyncio.run(self.get_1m_candle_data_async(symbol, dt, source))
 
-    async def get_candle_data_async(self, symbol: str, dt: date, source: str = 'BID') -> pd.DataFrame:
+    async def get_1m_candle_data_async(self, symbol: str, dt: date, source: str = 'BID') -> pd.DataFrame:
         """
         Asynchronously downloads, decompresses, and parses candle data for the given symbol and datetime.
         The source parameter can be 'BID' or 'ASK'.
         """
-        raw_data = await self._get_candle_data_async(symbol, dt.year, dt.month, dt.day, source)
+        raw_data = await self._get_1m_candle_data_async(symbol, dt.year, dt.month, dt.day, source)
+        decompressed = self._decompress_data(raw_data)
+        return self._parse_candle_data(symbol, decompressed, dt.year, dt.month, dt.day)
+
+    def get_1h_candle_data(self, symbol: str, dt: date, source: str = 'BID') -> pd.DataFrame:
+        """
+        Synchronous wrapper that downloads and parses candle data for the given symbol and date.
+        Internally it calls the asynchronous method using asyncio.run.
+        """
+        return asyncio.run(self.get_1h_candle_data_async(symbol, dt, source))
+
+    async def get_1h_candle_data_async(self, symbol: str, dt: date, source: str = 'BID') -> pd.DataFrame:
+        """
+        Asynchronously downloads, decompresses, and parses candle data for the given symbol and datetime.
+        The source parameter can be 'BID' or 'ASK'.
+        """
+        raw_data = await self._get_1h_candle_data_async(symbol, dt.year, dt.month, source)
         decompressed = self._decompress_data(raw_data)
         return self._parse_candle_data(symbol, decompressed, dt.year, dt.month, dt.day)
 
@@ -245,12 +262,19 @@ class DukasData:
         using pandas resample.
         Supported timeframes: 1, 5, 15, 30, 60, 240, 1440
         """
-        df_1m = self.get_candle_data(symbol, dt, source='BID')
-        if timeframe == 1:
-            return df_1m
-
-        df = df_1m.copy().set_index('timestamp').sort_index()
-
         if timeframe not in self.timeframe_map:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
-        return df.resample(self.timeframe_map[timeframe]).agg(self.aggregation).dropna().reset_index()
+        if timeframe in [1, 5, 15, 30]:
+            df_1m = self.get_1m_candle_data(symbol, dt, source='BID')
+            if timeframe == 1:
+                return df_1m
+
+            df = df_1m.set_index('timestamp').sort_index()
+            return df.resample(self.timeframe_map[timeframe]).agg(self.aggregation).dropna().reset_index()
+        else:
+            df_1h = self.get_1h_candle_data(symbol, dt, source='BID')
+            if timeframe == 60:
+                return df_1h
+
+            df = df_1h.set_index('timestamp').sort_index()
+            return df.resample(self.timeframe_map[timeframe]).agg(self.aggregation).dropna().reset_index()
